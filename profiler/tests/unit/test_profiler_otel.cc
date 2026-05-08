@@ -26,8 +26,6 @@ protected:
         setPid(0);
     }
 
-    void TearDown() override {}
-
     static void mock_logger(ncclDebugLogLevel level, unsigned long flags, const char* file, int line, const char* fmt,
                             ...)
     {

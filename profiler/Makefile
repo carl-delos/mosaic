@@ -114,17 +114,20 @@ test-build: test-configure
 	@echo "Building NCCL OTEL Profiler Plugin Tests..."
 	@$(MAKE) -C $(TEST_BUILD_DIR) -j$(shell nproc)
 	@echo "Test build complete: $(TEST_BUILD_DIR)/nccl_profiler_otel_tests"
+	@echo "Test build complete: $(TEST_BUILD_DIR)/nccl_profiler_otel_telemetry_tests"
 
 .PHONY: test
 test: test-build
 	@echo "Running NCCL OTEL Profiler Plugin Tests..."
 	@cd $(TEST_BUILD_DIR) && ./nccl_profiler_otel_tests
+	@cd $(TEST_BUILD_DIR) && ./nccl_profiler_otel_telemetry_tests
 	@echo "Tests complete."
 
 .PHONY: test-verbose
 test-verbose: test-build
 	@echo "Running NCCL OTEL Profiler Plugin Tests (verbose)..."
 	@$(TEST_BUILD_DIR)/nccl_profiler_otel_tests
+	@$(TEST_BUILD_DIR)/nccl_profiler_otel_telemetry_tests
 	@echo "Tests complete"
 
 # Coverage targets (uses a separate build directory to avoid mixing with regular test builds)
@@ -149,18 +152,34 @@ coverage-build: coverage-configure
 coverage: coverage-build
 	@echo "Running tests with coverage..."
 	@cd $(COVERAGE_BUILD_DIR) && ./nccl_profiler_otel_tests
+	@cd $(COVERAGE_BUILD_DIR) && ./nccl_profiler_otel_telemetry_tests
 	@echo "Collecting coverage data..."
-	@lcov --capture --directory $(COVERAGE_BUILD_DIR) --output-file $(COVERAGE_BUILD_DIR)/coverage.info --rc branch_coverage=0 --ignore-errors mismatch,inconsistent,negative,unused --quiet
-	@lcov --remove $(COVERAGE_BUILD_DIR)/coverage.info '*/tests/*' '*/mocks/*' '/usr/*' '*/googletest/*' \
-		--output-file $(COVERAGE_BUILD_DIR)/coverage.info --rc branch_coverage=0 --ignore-errors mismatch,inconsistent,negative,unused --quiet
-	@echo ""
-	@echo "=== Coverage Summary ==="
-	@lcov --list $(COVERAGE_BUILD_DIR)/coverage.info --rc branch_coverage=0
-	@echo ""
-	@echo "Coverage info: $(COVERAGE_BUILD_DIR)/coverage.info"
-	@if command -v genhtml > /dev/null 2>&1; then \
-		genhtml $(COVERAGE_BUILD_DIR)/coverage.info --output-directory $(COVERAGE_BUILD_DIR)/coverage_html --rc branch_coverage=0 --ignore-errors mismatch,inconsistent,negative,unused --quiet; \
+	@if command -v lcov > /dev/null 2>&1; then \
+		lcov --capture --directory $(COVERAGE_BUILD_DIR) --output-file $(COVERAGE_BUILD_DIR)/coverage.info --rc branch_coverage=0 --ignore-errors mismatch,inconsistent,negative,unused --quiet; \
+		lcov --remove $(COVERAGE_BUILD_DIR)/coverage.info '*/tests/*' '*/mocks/*' '/usr/*' '*/googletest/*' \
+			--output-file $(COVERAGE_BUILD_DIR)/coverage.info --rc branch_coverage=0 --ignore-errors mismatch,inconsistent,negative,unused --quiet; \
+		echo ""; \
+		echo "=== Coverage Summary ==="; \
+		lcov --list $(COVERAGE_BUILD_DIR)/coverage.info --rc branch_coverage=0; \
+		echo ""; \
+		echo "Coverage info: $(COVERAGE_BUILD_DIR)/coverage.info"; \
+		if command -v genhtml > /dev/null 2>&1; then \
+			genhtml $(COVERAGE_BUILD_DIR)/coverage.info --output-directory $(COVERAGE_BUILD_DIR)/coverage_html --rc branch_coverage=0 --ignore-errors mismatch,inconsistent,negative,unused --quiet; \
+			echo "HTML report:   $(COVERAGE_BUILD_DIR)/coverage_html/index.html"; \
+		fi; \
+	elif command -v python > /dev/null 2>&1 && python -c "import gcovr" > /dev/null 2>&1; then \
+		mkdir -p $(COVERAGE_BUILD_DIR)/coverage_html; \
+		python -m gcovr --root . --object-directory $(COVERAGE_BUILD_DIR) --exclude '^tests/' \
+			--gcov-ignore-parse-errors=negative_hits.warn_once_per_file --txt-summary \
+			--lcov $(COVERAGE_BUILD_DIR)/coverage.info; \
+		python -m gcovr --root . --object-directory $(COVERAGE_BUILD_DIR) --exclude '^tests/' \
+			--gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+			--html-details $(COVERAGE_BUILD_DIR)/coverage_html/index.html > /dev/null; \
+		echo "Coverage info: $(COVERAGE_BUILD_DIR)/coverage.info"; \
 		echo "HTML report:   $(COVERAGE_BUILD_DIR)/coverage_html/index.html"; \
+	else \
+		echo "ERROR: neither lcov nor python -m gcovr is available in the current environment."; \
+		exit 1; \
 	fi
 
 .PHONY: coverage-clean

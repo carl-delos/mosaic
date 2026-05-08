@@ -6,8 +6,19 @@
 #include <numeric>  // For std::accumulate
 #include <set>      // For std::set
 
+/**
+ * @brief Construct a LinearRegression accumulator.
+ *
+ * @param[in] mode Regression mode controlling how points are retained.
+ */
 LinearRegression::LinearRegression(Mode mode) : mode_(mode), sumX(0.0), sumY(0.0), sumXY(0.0), sumX2(0.0), n(0) {}
 
+/**
+ * @brief Add a transfer sample to the regression state.
+ *
+ * @param[in] x Transfer size in bytes.
+ * @param[in] y Transfer time in microseconds.
+ */
 void LinearRegression::addPoint(double x, double y)
 {
     if (mode_ == Mode::AVG)
@@ -49,6 +60,11 @@ void LinearRegression::addPoint(double x, double y)
     }
 }
 
+/**
+ * @brief Merge samples from another accumulator.
+ *
+ * @param[in] other Source accumulator to merge into this one.
+ */
 void LinearRegression::merge(const LinearRegression& other)
 {
     if (mode_ == Mode::AVG)
@@ -97,6 +113,9 @@ void LinearRegression::merge(const LinearRegression& other)
     }
 }
 
+/**
+ * @brief Reset the accumulator to an empty state.
+ */
 void LinearRegression::clear()
 {
     dataPoints.clear();
@@ -108,6 +127,14 @@ void LinearRegression::clear()
     n     = 0;
 }
 
+/**
+ * @brief Compute the least-squares slope and intercept.
+ *
+ * @param[out] slope Transfer-time slope in microseconds per byte.
+ * @param[out] intercept Estimated fixed latency in microseconds.
+ *
+ * @return true when at least two non-degenerate points are available.
+ */
 bool LinearRegression::calculate(double& slope, double& intercept) const
 {
     if (n < 2)
@@ -132,6 +159,11 @@ bool LinearRegression::calculate(double& slope, double& intercept) const
     return true;
 }
 
+/**
+ * @brief Check whether the accumulator has at least three unique sizes.
+ *
+ * @return true when enough size diversity exists for latency estimation.
+ */
 bool LinearRegression::hasAtLeastThreeDifferentSizes() const
 {
     if (mode_ == Mode::AVG)
@@ -152,6 +184,13 @@ bool LinearRegression::hasAtLeastThreeDifferentSizes() const
     return false;
 }
 
+/**
+ * @brief Compute the R-squared goodness-of-fit value.
+ *
+ * @param[out] rSquared Coefficient of determination for the fitted line.
+ *
+ * @return true when the regression and fit statistics were computed.
+ */
 bool LinearRegression::calculateRSquared(double& rSquared) const
 {
     if (n < 2)

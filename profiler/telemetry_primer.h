@@ -11,7 +11,8 @@
 #include <utility>
 
 #include "aggregation.h"
-#include "communicator_state.h"
+
+struct CommunicatorState;
 
 /**
  * @file telemetry_primer.h
@@ -30,15 +31,8 @@
  * defined at compile time (same guard as telemetry.cc).
  */
 
-// Number of windows to wait after scale_up_exec_mode becomes NON_CUDA_GRAPH before emitting primer.
-// This allows time for the NON_CUDA_GRAPH → CUDA_GRAPH transition during model warmup/graph capture.
-// Note: CUDA_GRAPH is the final stable state and can be emitted immediately (no transition back).
-#define PRIMER_STABILIZATION_WINDOWS 2
-
-// Maximum total windows to wait before forcing primer emission (even if scale_up_exec_mode is still UNKNOWN)
-// This prevents primers from waiting indefinitely if mode detection fails or is unsupported.
-// Default: 10 windows (~50 seconds at 5s/window)
-#define PRIMER_MAX_WAIT_WINDOWS 10
+#define PRIMER_STABILIZATION_WINDOWS 2U
+#define PRIMER_MAX_WAIT_WINDOWS      10U
 
 /**
  * @brief Primer state for a metric key.
@@ -74,122 +68,37 @@ using PrimerKey = std::pair<CommunicatorState*, std::string>;
 
 #ifdef ENABLE_OTEL
 
-// =======================================================================================
-// Primer Orchestration Functions - Phase 1 (Process Pending Primers)
-// =======================================================================================
-
-/**
- * @brief Process pending collective primers (from previous windows).
- *
- * Handles the primer state machine for primers that were registered in previous windows:
- * - Merges current window data with accumulated primer data
- * - Checks scale_up_exec_mode stabilization
- * - Emits primers when ready (either after stabilization or force-emit after timeout)
- * - Emits real accumulated data after primer is sent
- *
- * @param[in] commState Communicator state being processed
- * @param[in] collectives Map of collective keys to aggregated data for current window
- * @return Set of keys that were handled (exported or updated) by pending primers
- */
 std::set<std::string> processPendingCollectivePrimers(CommunicatorState* commState,
                                                       const std::map<std::string, AggregatedCollective>& collectives);
 
-/**
- * @brief Process pending P2P primers (from previous windows).
- *
- * Handles the primer state machine for primers that were registered in previous windows:
- * - Merges current window data with accumulated primer data
- * - Checks scale_up_exec_mode stabilization
- * - Emits primers when ready (either after stabilization or force-emit after timeout)
- * - Emits real accumulated data after primer is sent
- *
- * @param[in] commState Communicator state being processed
- * @param[in] p2ps Map of P2P keys to aggregated data for current window
- * @return Set of keys that were handled (exported or updated) by pending primers
- */
 std::set<std::string> processPendingP2PPrimers(CommunicatorState* commState,
                                                const std::map<std::string, AggregatedP2P>& p2ps);
 
-/**
- * @brief Process pending Rank transfer primers (from previous windows).
- *
- * Handles the primer state machine for primers that were registered in previous windows:
- * - Merges current window data with accumulated primer data
- * - Checks scale_up_exec_mode stabilization
- * - Emits primers when ready (either after stabilization or force-emit after timeout)
- * - Emits real accumulated data after primer is sent
- *
- * @param[in] commState Communicator state being processed
- * @param[in] rankTransfers Map of rank transfer keys to aggregated data for current window
- * @return Set of keys that were handled (exported or updated) by pending primers
- */
 std::set<std::string> processPendingRankPrimers(CommunicatorState* commState,
                                                 const std::map<std::string, AggregatedTransfer>& rankTransfers);
 
-/**
- * @brief Process pending Channel transfer primers (from previous windows).
- *
- * Handles the primer state machine for primers that were registered in previous windows:
- * - Merges current window data with accumulated primer data
- * - Checks scale_up_exec_mode stabilization
- * - Emits primers when ready (either after stabilization or force-emit after timeout)
- * - Emits real accumulated data after primer is sent
- *
- * @param[in] commState Communicator state being processed
- * @param[in] channelTransfers Map of channel transfer keys to aggregated data for current window
- * @return Set of keys that were handled (exported or updated) by pending primers
- */
 std::set<std::string> processPendingTransferPrimers(CommunicatorState* commState,
                                                     const std::map<std::string, AggregatedTransfer>& channelTransfers);
 
-// =======================================================================================
-// Primer Helper Functions - Phase 2 (Check/Register New Keys)
-// =======================================================================================
-
-/**
- * @brief Check if a collective key has completed its primer cycle.
- *
- * @return true if the key's primer was already emitted and real data exported
- */
 bool isCollectivePrimerDone(CommunicatorState* commState, const std::string& key);
 
-/**
- * @brief Register a new collective key for primer processing.
- *
- * Initializes the key in PENDING_PRIMER state. The primer will be emitted
- * in subsequent windows after scale_up_exec_mode stabilizes.
- */
 void registerCollectivePrimer(CommunicatorState* commState, const std::string& key, const AggregatedCollective& data);
 
-/**
- * @brief Check if a P2P key has completed its primer cycle.
- */
 bool isP2PPrimerDone(CommunicatorState* commState, const std::string& key);
 
-/**
- * @brief Register a new P2P key for primer processing.
- */
 void registerP2PPrimer(CommunicatorState* commState, const std::string& key, const AggregatedP2P& data);
 
-/**
- * @brief Check if a rank transfer key has completed its primer cycle.
- */
 bool isRankPrimerDone(CommunicatorState* commState, const std::string& key);
 
-/**
- * @brief Register a new rank transfer key for primer processing.
- */
 void registerRankPrimer(CommunicatorState* commState, const std::string& key, const AggregatedTransfer& data);
 
-/**
- * @brief Check if a channel transfer key has completed its primer cycle.
- */
 bool isTransferPrimerDone(CommunicatorState* commState, const std::string& key);
 
-/**
- * @brief Register a new channel transfer key for primer processing.
- */
 void registerTransferPrimer(CommunicatorState* commState, const std::string& key, const AggregatedTransfer& data);
+
+#ifdef UNIT_TESTING
+void resetTelemetryPrimerStateForTests();
+#endif
 
 #endif  // ENABLE_OTEL
 #endif  // OTEL_TELEMETRY_PRIMER_H_
