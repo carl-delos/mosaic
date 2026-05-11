@@ -186,5 +186,6 @@ void processWindow(CommunicatorState* commState, int window_idx);
 void telemetryRuntimeInit();
 void telemetryRuntimeCleanup();
 void telemetryRuntimeNotifyWindowReady(CommunicatorState* commState, int window_idx);
+void telemetryRuntimeUnregisterCommunicator(CommunicatorState* commState);
 
 #endif  // OTEL_TELEMETRY_INTERNAL_H_

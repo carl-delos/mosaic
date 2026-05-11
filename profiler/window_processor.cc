@@ -53,15 +53,15 @@ void processWindow(CommunicatorState* commState, int window_idx)
 
     aggregator.finalize();
 
-    const auto& collectives      = aggregator.getCollectives();
-    const auto& p2ps             = aggregator.getP2Ps();
-    const auto& rankTransfers    = aggregator.getRankTransfers();
-    const auto& channelTransfers = aggregator.getChannelTransfers();
+    const std::map<std::string, AggregatedCollective>& collectives    = aggregator.getCollectives();
+    const std::map<std::string, AggregatedP2P>& p2ps                  = aggregator.getP2Ps();
+    const std::map<std::string, AggregatedTransfer>& rankTransfers    = aggregator.getRankTransfers();
+    const std::map<std::string, AggregatedTransfer>& channelTransfers = aggregator.getChannelTransfers();
 
-    auto handledCollectives      = processPendingCollectivePrimers(commState, collectives);
-    auto handledP2Ps             = processPendingP2PPrimers(commState, p2ps);
-    auto handledRankTransfers    = processPendingRankPrimers(commState, rankTransfers);
-    auto handledChannelTransfers = processPendingTransferPrimers(commState, channelTransfers);
+    std::set<std::string> handledCollectives      = processPendingCollectivePrimers(commState, collectives);
+    std::set<std::string> handledP2Ps             = processPendingP2PPrimers(commState, p2ps);
+    std::set<std::string> handledRankTransfers    = processPendingRankPrimers(commState, rankTransfers);
+    std::set<std::string> handledChannelTransfers = processPendingTransferPrimers(commState, channelTransfers);
 
     for (const auto& pair : collectives)
     {

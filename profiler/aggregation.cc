@@ -4,9 +4,10 @@
 #include "aggregation.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cstring>
 #include <limits>
 #include <set>
-#include <sstream>
 #include <unordered_map>
 #include <vector>
 
@@ -31,6 +32,107 @@ static LinearRegression::Mode getLinearRegressionMode()
         OTEL_WARN(NCCL_INIT, "Unknown LinearRegressionMode '%s', defaulting to MIN", modeStr);
     }
     return LinearRegression::Mode::MIN;
+}
+
+/**
+ * @brief Append an integer value to a string without stream formatting.
+ *
+ * @tparam Int Integer type to append.
+ * @param[in,out] out Destination string.
+ * @param[in] value Integer value to append.
+ */
+template <typename Int>
+static inline void appendInteger(std::string& out, Int value)
+{
+    char buffer[32];
+    auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+    out.append(buffer, result.ptr);
+}
+
+/**
+ * @brief Return the provided token or a fallback literal for null pointers.
+ *
+ * @param[in] value Optional C string token.
+ *
+ * @return `value` when non-null, otherwise `"NULL"`.
+ */
+static inline const char* getTokenOrNull(const char* value)
+{
+    return value ? value : "NULL";
+}
+
+/**
+ * @brief Return the communicator hostname or a shared fallback string.
+ *
+ * @param[in] commState Optional communicator state.
+ *
+ * @return Communicator hostname when available, otherwise `"unknown"`.
+ */
+static inline const std::string& getHostnameOrUnknown(const CommunicatorState* commState)
+{
+    static const std::string kUnknownHostname = "unknown";
+    return commState ? commState->hostname : kUnknownHostname;
+}
+
+/**
+ * @brief Append the standard communicator key prefix to an aggregation key.
+ *
+ * @param[in,out] out Destination key string.
+ * @param[in] commHash Communicator hash to encode.
+ */
+static inline void appendCommPrefix(std::string& out, uint64_t commHash)
+{
+    out.append("Comm");
+    appendInteger(out, commHash);
+}
+
+/**
+ * @brief Build a rank or channel transfer aggregation key.
+ *
+ * @param[in] commHash Communicator hash.
+ * @param[in] commState Optional communicator state providing hostname and rank.
+ * @param[in] fallbackRank Rank value to use when `commState` is null.
+ * @param[in] peer Destination peer rank or pipeline.
+ * @param[in] isP2P Whether the key should use P2P naming.
+ * @param[in] includeChannel Whether to append a channel suffix.
+ * @param[in] channelId Channel identifier appended when `includeChannel` is true.
+ *
+ * @return Fully formatted transfer aggregation key.
+ */
+static std::string buildTransferKey(uint64_t commHash, const CommunicatorState* commState, int fallbackRank, int peer,
+                                    bool isP2P, bool includeChannel, int channelId)
+{
+    const std::string& hostname = getHostnameOrUnknown(commState);
+    const int sourceRank        = commState ? commState->rank : fallbackRank;
+
+    std::string key;
+    key.reserve(48 + hostname.size());
+    appendCommPrefix(key, commHash);
+    key.push_back('_');
+
+    if (isP2P)
+    {
+        key.append(hostname);
+        key.append("_Pipeline");
+        appendInteger(key, sourceRank);
+        key.append("_ToPipeline");
+        appendInteger(key, peer);
+    }
+    else
+    {
+        key.append("Rank");
+        appendInteger(key, sourceRank);
+        key.append("_ToPeer");
+        appendInteger(key, peer);
+    }
+
+    if (includeChannel)
+    {
+        key.append("_Chnl");
+        appendInteger(key, channelId);
+    }
+
+    return key;
 }
 
 /**
@@ -74,7 +176,7 @@ double AggregatedTransfer::getActiveTime() const
 {
     if (intervals.empty()) return 0.0;
 
-    auto sorted = intervals;
+    std::vector<std::pair<double, double>> sorted = intervals;
     std::sort(sorted.begin(), sorted.end());
 
     double activeTime   = 0.0;
@@ -169,12 +271,24 @@ WindowAggregator::WindowAggregator(int rank) : rank(rank) {}
  */
 std::string WindowAggregator::getCollectiveKey(const otelEventHandle_t& event) const
 {
-    std::stringstream ss;
     uint64_t commHash = event.commState ? event.commState->comm_hash : 0;
-    ss << "Comm" << commHash << "_" << (event.coll.func ? event.coll.func : "NULL") << "_"
-       << (event.coll.algo ? event.coll.algo : "NULL") << "_" << (event.coll.proto ? event.coll.proto : "NULL") << "_"
-       << (int)event.coll.nChannels << "Chnl";
-    return ss.str();
+    const char* func  = getTokenOrNull(event.coll.func);
+    const char* algo  = getTokenOrNull(event.coll.algo);
+    const char* proto = getTokenOrNull(event.coll.proto);
+
+    std::string key;
+    key.reserve(32 + std::strlen(func) + std::strlen(algo) + std::strlen(proto));
+    appendCommPrefix(key, commHash);
+    key.push_back('_');
+    key.append(func);
+    key.push_back('_');
+    key.append(algo);
+    key.push_back('_');
+    key.append(proto);
+    key.push_back('_');
+    appendInteger(key, (int)event.coll.nChannels);
+    key.append("Chnl");
+    return key;
 }
 
 /**
@@ -189,21 +303,31 @@ std::string WindowAggregator::getCollectiveKey(const otelEventHandle_t& event) c
  */
 std::string WindowAggregator::getP2PKey(const otelEventHandle_t& event) const
 {
-    std::stringstream ss;
-
-    uint64_t commHash    = event.commState ? event.commState->comm_hash : 0;
-    std::string hostname = event.commState ? event.commState->hostname : "unknown";
+    uint64_t commHash           = event.commState ? event.commState->comm_hash : 0;
+    const std::string& hostname = getHostnameOrUnknown(event.commState);
     // For P2P: rank within the P2P comm (0 or 1) represents the pipeline number
     int src_pipeline = event.commState ? event.commState->rank : rank;
-    const char* func = event.p2p.func ? event.p2p.func : "NULL";
+    const char* func = getTokenOrNull(event.p2p.func);
 
     // Key format: Comm<hash>_(<hostname>)_<func>_Pipeline<src>ToPipeline<dst>_<nChannels>Chnl
     // For P2P comms (nranks=2), both src and peer (0 or 1) represent pipeline numbers
     // Example: Comm123456_(romeo)_Send_Pipeline0ToPipeline1_2Chnl
-    ss << "Comm" << commHash << "_(" << hostname << ")_" << func << "_Pipeline" << src_pipeline << "ToPipeline"
-       << event.p2p.peer << "_" << (int)event.p2p.nChannels << "Chnl";
+    std::string key;
+    key.reserve(48 + hostname.size() + std::strlen(func));
+    appendCommPrefix(key, commHash);
+    key.append("_(");
+    key.append(hostname);
+    key.append(")_");
+    key.append(func);
+    key.append("_Pipeline");
+    appendInteger(key, src_pipeline);
+    key.append("ToPipeline");
+    appendInteger(key, event.p2p.peer);
+    key.push_back('_');
+    appendInteger(key, (int)event.p2p.nChannels);
+    key.append("Chnl");
 
-    return ss.str();
+    return key;
 }
 
 /**
@@ -224,23 +348,7 @@ std::string WindowAggregator::getP2PKey(const otelEventHandle_t& event) const
 std::string WindowAggregator::getRankTransferKey(uint64_t commHash, int peer, const CommunicatorState* commState,
                                                  bool isP2P) const
 {
-    std::stringstream ss;
-
-    if (isP2P)
-    {
-        // P2P: Show hostname and pipeline numbers
-        // rank within P2P comm (0 or 1) represents the pipeline number
-        std::string hostname = commState ? commState->hostname : "unknown";
-        int src_pipeline     = commState ? commState->rank : rank;
-        ss << "Comm" << commHash << "_" << hostname << "_Pipeline" << src_pipeline << "_ToPipeline" << peer;
-    }
-    else
-    {
-        // COLLECTIVE: Show rank within communicator (no hostname)
-        int comm_rank = commState ? commState->rank : rank;
-        ss << "Comm" << commHash << "_Rank" << comm_rank << "_ToPeer" << peer;
-    }
-    return ss.str();
+    return buildTransferKey(commHash, commState, rank, peer, isP2P, false, 0);
 }
 
 /**
@@ -259,23 +367,10 @@ std::string WindowAggregator::getRankTransferKey(uint64_t commHash, int peer, co
  */
 std::string WindowAggregator::getChannelTransferKey(const otelEventHandle_t& event, bool isP2P) const
 {
-    std::stringstream ss;
     uint64_t commHash = event.commState ? event.commState->comm_hash : 0;
 
-    if (isP2P)
-    {
-        std::string hostname = event.commState ? event.commState->hostname : "unknown";
-        int src_pipeline     = event.commState ? event.commState->rank : event.rank;
-        ss << "Comm" << commHash << "_" << hostname << "_Pipeline" << src_pipeline << "_ToPipeline"
-           << event.proxyOp.peer << "_Chnl" << (int)event.proxyOp.channelId;
-    }
-    else
-    {
-        int comm_rank = event.commState ? event.commState->rank : event.rank;
-        ss << "Comm" << commHash << "_Rank" << comm_rank << "_ToPeer" << event.proxyOp.peer << "_Chnl"
-           << (int)event.proxyOp.channelId;
-    }
-    return ss.str();
+    return buildTransferKey(commHash, event.commState, event.rank, event.proxyOp.peer, isP2P, true,
+                            (int)event.proxyOp.channelId);
 }
 
 /**
@@ -287,9 +382,11 @@ std::string WindowAggregator::getChannelTransferKey(const otelEventHandle_t& eve
  */
 std::string WindowAggregator::getTransferChannelKey(uint8_t channelId) const
 {
-    std::stringstream ss;
-    ss << "Chnl" << (int)channelId;
-    return ss.str();
+    std::string key;
+    key.reserve(16);
+    key.append("Chnl");
+    appendInteger(key, (int)channelId);
+    return key;
 }
 
 /**
@@ -508,16 +605,16 @@ void WindowAggregator::identifyGroupedAlltoAllOperations(
 {
     alltoAllP2PHandles.clear();
 
-    for (const auto* groupEvent : groupEvents)
+    for (const otelEventHandle_t* groupEvent : groupEvents)
     {
         if (!groupEvent || !groupEvent->commState) continue;
 
         std::vector<const void*> groupedP2PHandles;
         for (const auto& p2pPair : p2pHandleToOp)
         {
-            const InProgressOperation& op    = p2pPair.second;
-            const auto* p2pEvent             = static_cast<const otelEventHandle_t*>(p2pPair.first);
-            const CommunicatorState* p2pComm = p2pEvent ? p2pEvent->commState : nullptr;
+            const InProgressOperation& op     = p2pPair.second;
+            const otelEventHandle_t* p2pEvent = static_cast<const otelEventHandle_t*>(p2pPair.first);
+            const CommunicatorState* p2pComm  = p2pEvent ? p2pEvent->commState : nullptr;
 
             if (p2pComm != groupEvent->commState) continue;
             if (op.startTs < groupEvent->startTs || op.startTs > groupEvent->endTs) continue;
@@ -555,7 +652,7 @@ void WindowAggregator::classifyScaleUpCommunicatorExecutionMode()
         return;
     }
 
-    auto execMode =
+    CommunicatorState::ScaleUpExecMode execMode =
         static_cast<CommunicatorState::ScaleUpExecMode>(commState->scaleUpExecMode.load(std::memory_order_acquire));
 
     if (execMode == CommunicatorState::ScaleUpExecMode::CUDA_GRAPH)
@@ -574,7 +671,7 @@ void WindowAggregator::classifyScaleUpCommunicatorExecutionMode()
     {
         const void* parentHandle = parentPair.first;
         bool isCollParent        = collHandleToOp.count(parentHandle) > 0;
-        for (const auto& kch : parentPair.second)
+        for (const otelEventHandle_t& kch : parentPair.second)
         {
             sawAnyKernelCh = true;
             if (kch.kernelCh.pTimerStart == 0) continue;
@@ -681,22 +778,24 @@ void WindowAggregator::linkProxyOpsToParents()
             bool isP2PTransfer = isP2POperation(parentHandle, proxyOp.commState);
             std::string rankTransferKey =
                 getRankTransferKey(commHash, proxyOp.proxyOp.peer, proxyOp.commState, isP2PTransfer);
-            rankTransfers[rankTransferKey].totalBytes += transfers.totalBytes;
-            rankTransfers[rankTransferKey].totalTimeUs += transfers.totalTimeUs;
-            rankTransfers[rankTransferKey].count += transfers.count;
+            AggregatedTransfer& rankTransfer = rankTransfers[rankTransferKey];
+            rankTransfer.totalBytes += transfers.totalBytes;
+            rankTransfer.totalTimeUs += transfers.totalTimeUs;
+            rankTransfer.count += transfers.count;
             // Merge the individual ProxyStep data points from this ProxyOp
-            rankTransfers[rankTransferKey].lr.merge(transfers.lr);
+            rankTransfer.lr.merge(transfers.lr);
             // Merge transfer intervals for bandwidth calculation based on active transfer time
-            rankTransfers[rankTransferKey].mergeIntervals(transfers);
+            rankTransfer.mergeIntervals(transfers);
 
-            std::string channelTransferKey = getChannelTransferKey(proxyOp, isP2PTransfer);
-            channelTransfers[channelTransferKey].totalBytes += transfers.totalBytes;
-            channelTransfers[channelTransferKey].totalTimeUs += transfers.totalTimeUs;
-            channelTransfers[channelTransferKey].count += transfers.count;
+            std::string channelTransferKey      = getChannelTransferKey(proxyOp, isP2PTransfer);
+            AggregatedTransfer& channelTransfer = channelTransfers[channelTransferKey];
+            channelTransfer.totalBytes += transfers.totalBytes;
+            channelTransfer.totalTimeUs += transfers.totalTimeUs;
+            channelTransfer.count += transfers.count;
             // Merge the individual ProxyStep data points from this ProxyOp
-            channelTransfers[channelTransferKey].lr.merge(transfers.lr);
+            channelTransfer.lr.merge(transfers.lr);
             // Merge transfer intervals for bandwidth calculation based on active transfer time
-            channelTransfers[channelTransferKey].mergeIntervals(transfers);
+            channelTransfer.mergeIntervals(transfers);
         }
         else
         {
@@ -817,14 +916,18 @@ void WindowAggregator::reconstructGroupedAlltoAllOperations(
             continue;
         }
 
-        std::stringstream ss;
-        ss << "Comm" << firstEvent->commState->comm_hash << "_AlltoAll_" << firstEvent->commState->nranks << "Ranks";
-        std::string collKey = ss.str();
+        std::string collKey;
+        collKey.reserve(32);
+        appendCommPrefix(collKey, firstEvent->commState->comm_hash);
+        collKey.append("_AlltoAll_");
+        appendInteger(collKey, firstEvent->commState->nranks);
+        collKey.append("Ranks");
 
-        collectives[collKey].addCollective(totalBytes, duration);
+        AggregatedCollective& collective = collectives[collKey];
+        collective.addCollective(totalBytes, duration);
         if (totalTransferCount > 0)
         {
-            collectives[collKey].addTransferBatch(totalTransferCount, totalTransferBytes, totalTransferTimeUs);
+            collective.addTransferBatch(totalTransferCount, totalTransferBytes, totalTransferTimeUs);
         }
 
         OTEL_TRACE(NCCL_INIT,
@@ -911,7 +1014,7 @@ bool WindowAggregator::isP2POperation(const void* rootHandle, const Communicator
 size_t WindowAggregator::countGroupSendP2pApis(const otelEventHandle_t& groupEvent) const
 {
     double previousGroupEndTs = -std::numeric_limits<double>::infinity();
-    for (const auto* otherGroup : groupEvents)
+    for (const otelEventHandle_t* otherGroup : groupEvents)
     {
         if (!otherGroup || otherGroup == &groupEvent) continue;
         if (otherGroup->commState != groupEvent.commState) continue;
@@ -920,7 +1023,7 @@ size_t WindowAggregator::countGroupSendP2pApis(const otelEventHandle_t& groupEve
     }
 
     size_t sendApiCount = 0;
-    for (const auto* apiEvent : p2pApiEvents)
+    for (const otelEventHandle_t* apiEvent : p2pApiEvents)
     {
         if (!apiEvent || apiEvent->commState != groupEvent.commState) continue;
         if (apiEvent->startTs <= previousGroupEndTs || apiEvent->startTs > groupEvent.startTs) continue;
@@ -944,7 +1047,7 @@ bool WindowAggregator::isAlltoAllGroup(const otelEventHandle_t& groupEvent, cons
 {
     if (p2pHandles.empty()) return false;
 
-    const auto* firstEvent = static_cast<const otelEventHandle_t*>(p2pHandles.front());
+    const otelEventHandle_t* firstEvent = static_cast<const otelEventHandle_t*>(p2pHandles.front());
     if (!firstEvent || !firstEvent->commState) return false;
     if (firstEvent->commState != groupEvent.commState) return false;
 
@@ -959,8 +1062,8 @@ bool WindowAggregator::isAlltoAllGroup(const otelEventHandle_t& groupEvent, cons
         auto opIt = p2pHandleToOp.find(p2pHandle);
         if (opIt == p2pHandleToOp.end()) continue;
 
-        const auto* p2pEvent = static_cast<const otelEventHandle_t*>(p2pHandle);
-        int commRank         = p2pEvent->commState ? p2pEvent->commState->rank : p2pEvent->rank;
+        const otelEventHandle_t* p2pEvent = static_cast<const otelEventHandle_t*>(p2pHandle);
+        int commRank                      = p2pEvent->commState ? p2pEvent->commState->rank : p2pEvent->rank;
 
         peers.insert(opIt->second.peer);
         if (p2pEvent->parentObj) sendApiParents.insert(p2pEvent->parentObj);
@@ -1004,20 +1107,7 @@ std::string WindowAggregator::getScaleUpRankTransferKey(const CommunicatorState*
 std::string WindowAggregator::getScaleUpChannelTransferKey(const CommunicatorState* commState, int peer,
                                                            uint8_t channelId, bool isP2P) const
 {
-    std::stringstream ss;
     uint64_t commHash = commState ? commState->comm_hash : 0;
 
-    if (isP2P)
-    {
-        std::string hostname = commState ? commState->hostname : "unknown";
-        int src_pipeline     = commState ? commState->rank : rank;
-        ss << "Comm" << commHash << "_" << hostname << "_Pipeline" << src_pipeline << "_ToPipeline" << peer << "_Chnl"
-           << (int)channelId;
-    }
-    else
-    {
-        int comm_rank = commState ? commState->rank : rank;
-        ss << "Comm" << commHash << "_Rank" << comm_rank << "_ToPeer" << peer << "_Chnl" << (int)channelId;
-    }
-    return ss.str();
+    return buildTransferKey(commHash, commState, rank, peer, isP2P, true, (int)channelId);
 }

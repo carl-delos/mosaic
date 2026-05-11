@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Delos Data Inc
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
+
 #include "aggregation.h"
 #include "param.h"
 #include "profiler_otel.h"
@@ -22,8 +24,8 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
     CommunicatorState* commState = nullptr;
     if (!handleToOp.empty())
     {
-        const auto* eventPtr = static_cast<const otelEventHandle_t*>(handleToOp.begin()->first);
-        commState            = const_cast<CommunicatorState*>(eventPtr ? eventPtr->commState : nullptr);
+        const otelEventHandle_t* eventPtr = static_cast<const otelEventHandle_t*>(handleToOp.begin()->first);
+        commState                         = const_cast<CommunicatorState*>(eventPtr ? eventPtr->commState : nullptr);
     }
 
     const bool isCudaGraphDriven = commState && commState->isScaleUpCudaGraphDriven();
@@ -38,7 +40,7 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
         double lastKernelEndTs = 0.0;
         if (hasKernelEvents)
         {
-            for (const auto& kch : kernelIt->second)
+            for (const otelEventHandle_t& kch : kernelIt->second)
                 if (kch.endTs > lastKernelEndTs) lastKernelEndTs = kch.endTs;
         }
         return hasKernelEvents ? (lastKernelEndTs - op.startTs) : (op.endTs - op.startTs);
@@ -59,41 +61,67 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
     };
 
     auto recordTransferCacheBatch =
-        [&](const InProgressOperation& op, int numTransfers, size_t perTransferBytes, double perTransferTimeUs)
+        [&](const InProgressOperation& op, int numTransfers, size_t totalTransferBytes, double perTransferTimeUs)
     {
-        const size_t totalBytes = (size_t)numTransfers * perTransferBytes;
-        const double totalTime  = (double)numTransfers * perTransferTimeUs;
+        const double totalTime = (double)numTransfers * perTransferTimeUs;
         if (isColl)
-            collectives[op.key].addTransferBatch(numTransfers, totalBytes, totalTime);
+            collectives[op.key].addTransferBatch(numTransfers, totalTransferBytes, totalTime);
         else
-            p2ps[op.key].addTransferBatch(numTransfers, totalBytes, totalTime);
+            p2ps[op.key].addTransferBatch(numTransfers, totalTransferBytes, totalTime);
     };
 
     auto addRankChannelVolumeOnly =
         [&](const void* opHandle, const InProgressOperation& op, const InferredTransfers& inf)
     {
-        if (inf.numTransfers <= 0 || inf.perTransferBytes == 0) return;
+        if (inf.numTransfers <= 0 || inf.totalRankBytes == 0) return;
 
-        const auto* eventPtr        = static_cast<const otelEventHandle_t*>(opHandle);
-        const CommunicatorState* cs = eventPtr ? eventPtr->commState : nullptr;
-        const int peer              = op.peer;
+        const otelEventHandle_t* eventPtr = static_cast<const otelEventHandle_t*>(opHandle);
+        const CommunicatorState* cs       = eventPtr ? eventPtr->commState : nullptr;
+        const int peer                    = op.peer;
 
-        const size_t totalBytes = (size_t)inf.numTransfers * inf.perTransferBytes;
-        std::string rankKey     = getScaleUpRankTransferKey(cs, peer, !isColl);
-        rankTransfers[rankKey].totalBytes += totalBytes;
-        rankTransfers[rankKey].count += inf.numTransfers;
+        auto bytesInTransferRange = [&](int startTransferIdx, int transferCount) -> size_t
+        {
+            const size_t baseBytes  = inf.totalRankBytes / (size_t)inf.numTransfers;
+            const size_t remainder  = inf.totalRankBytes % (size_t)inf.numTransfers;
+            const int boundedStart  = startTransferIdx < 0 ? 0 : startTransferIdx;
+            const int boundedEnd    = std::min(inf.numTransfers, boundedStart + transferCount);
+            const size_t extraBytes = boundedEnd > boundedStart ? std::min<size_t>(remainder, (size_t)boundedEnd) -
+                                                                      std::min<size_t>(remainder, (size_t)boundedStart)
+                                                                : 0;
+            return (size_t)(boundedEnd - boundedStart) * baseBytes + extraBytes;
+        };
 
-        int nCh  = inf.numChannels > 0 ? inf.numChannels : 1;
-        int base = inf.numTransfers / nCh;
-        int rem  = inf.numTransfers % nCh;
+        std::string rankKey              = getScaleUpRankTransferKey(cs, peer, !isColl);
+        AggregatedTransfer& rankTransfer = rankTransfers[rankKey];
+        rankTransfer.totalBytes += inf.totalRankBytes;
+        rankTransfer.count += inf.numTransfers;
+
+        int nCh           = inf.numChannels > 0 ? inf.numChannels : 1;
+        int base          = inf.numTransfers / nCh;
+        int rem           = inf.numTransfers % nCh;
+        int transferIndex = 0;
         for (int ch = 0; ch < nCh; ch++)
         {
             int transfersThisCh = base + (ch < rem ? 1 : 0);
             if (transfersThisCh <= 0) continue;
-            std::string channelKey = getScaleUpChannelTransferKey(cs, peer, (uint8_t)ch, !isColl);
-            channelTransfers[channelKey].totalBytes += (size_t)transfersThisCh * inf.perTransferBytes;
-            channelTransfers[channelKey].count += transfersThisCh;
+            std::string channelKey              = getScaleUpChannelTransferKey(cs, peer, (uint8_t)ch, !isColl);
+            AggregatedTransfer& channelTransfer = channelTransfers[channelKey];
+            channelTransfer.totalBytes += bytesInTransferRange(transferIndex, transfersThisCh);
+            channelTransfer.count += transfersThisCh;
+            transferIndex += transfersThisCh;
         }
+    };
+
+    auto bytesForTransferIndex = [&](const InferredTransfers& inf, int transferIndex) -> size_t
+    {
+        if (inf.numTransfers <= 0 || transferIndex < 0 || transferIndex >= inf.numTransfers)
+        {
+            return 0;
+        }
+
+        const size_t baseBytes = inf.totalRankBytes / (size_t)inf.numTransfers;
+        const size_t remainder = inf.totalRankBytes % (size_t)inf.numTransfers;
+        return baseBytes + ((size_t)transferIndex < remainder ? 1U : 0U);
     };
 
     for (auto& pair : handleToOp)
@@ -119,7 +147,7 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
         recordCollectiveCountTime(op, collectiveTimeUs);
 
         InferredTransfers inferred = inferTransfers(op);
-        if (inferred.numTransfers <= 0 || inferred.perTransferBytes == 0)
+        if (inferred.numTransfers <= 0 || inferred.totalRankBytes == 0)
         {
             OTEL_TRACE(NCCL_INIT, "Scale-up %s (no inferred transfers): %s, bytes=%zu, duration=%.2f us",
                        isColl ? "Coll" : "P2P", op.key.c_str(), op.bytes, collectiveTimeUs);
@@ -135,7 +163,7 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
                 perTransferTime          = networkTime / inferred.numTransfers;
             }
 
-            recordTransferCacheBatch(op, inferred.numTransfers, inferred.perTransferBytes, perTransferTime);
+            recordTransferCacheBatch(op, inferred.numTransfers, inferred.totalRankBytes, perTransferTime);
             addRankChannelVolumeOnly(opHandle, op, inferred);
 
             OTEL_TRACE(NCCL_INIT,
@@ -150,12 +178,14 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
         const double perTransferTime =
             (inferred.numTransfers > 0 && networkTime > 0.0) ? (networkTime / inferred.numTransfers) : 0.0;
 
-        recordTransferCacheBatch(op, inferred.numTransfers, inferred.perTransferBytes, perTransferTime);
+        recordTransferCacheBatch(op, inferred.numTransfers, inferred.totalRankBytes, perTransferTime);
 
-        const auto* eventPtr               = static_cast<const otelEventHandle_t*>(opHandle);
+        const otelEventHandle_t* eventPtr  = static_cast<const otelEventHandle_t*>(opHandle);
         const CommunicatorState* eventComm = eventPtr ? eventPtr->commState : nullptr;
         int peer                           = op.peer;
         std::string rankKey                = getScaleUpRankTransferKey(eventComm, peer, !isColl);
+        AggregatedTransfer& rankTransfer   = rankTransfers[rankKey];
+        int transferIndex                  = 0;
 
         if (kernelEvents && !kernelEvents->empty())
         {
@@ -184,43 +214,18 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
                 double channelSpan    = channelEndTs - channelStartTs;
                 if (channelSpan <= 0.0) continue;
 
+                std::string channelKey = getScaleUpChannelTransferKey(eventComm, peer, (uint8_t)ch, !isColl);
+                AggregatedTransfer& channelTransfer = channelTransfers[channelKey];
                 for (int i = 0; i < transfersThisCh; i++)
                 {
-                    double intervalStart = channelStartTs + (channelSpan * i) / transfersThisCh;
-                    double intervalEnd   = intervalStart + perTransferTime;
+                    const size_t transferBytes = bytesForTransferIndex(inferred, transferIndex++);
+                    double intervalStart       = channelStartTs + (channelSpan * i) / transfersThisCh;
+                    double intervalEnd         = intervalStart + perTransferTime;
                     if (intervalEnd > channelEndTs) intervalEnd = channelEndTs;
 
-                    rankTransfers[rankKey].addTransferWithTimestamps(inferred.perTransferBytes, perTransferTime,
-                                                                     intervalStart, intervalEnd);
-                }
-            }
-
-            for (const auto& kch : *kernelEvents)
-            {
-                std::string channelKey = getScaleUpChannelTransferKey(eventComm, peer, kch.kernelCh.channelId, !isColl);
-                double channelStartTs  = kch.startTs;
-                double channelEndTs    = kch.endTs;
-
-                int transfersThisCh = 0;
-                if (inferred.numChannels > 0)
-                {
-                    int base        = inferred.numTransfers / inferred.numChannels;
-                    int rem         = inferred.numTransfers % inferred.numChannels;
-                    transfersThisCh = base + (((int)kch.kernelCh.channelId < rem) ? 1 : 0);
-                }
-                if (transfersThisCh <= 0) continue;
-
-                double channelSpan = channelEndTs - channelStartTs;
-                if (channelSpan <= 0.0) continue;
-
-                for (int i = 0; i < transfersThisCh; i++)
-                {
-                    double intervalStart = channelStartTs + (channelSpan * i) / transfersThisCh;
-                    double intervalEnd   = intervalStart + perTransferTime;
-                    if (intervalEnd > channelEndTs) intervalEnd = channelEndTs;
-
-                    channelTransfers[channelKey].addTransferWithTimestamps(inferred.perTransferBytes, perTransferTime,
-                                                                           intervalStart, intervalEnd);
+                    rankTransfer.addTransferWithTimestamps(transferBytes, perTransferTime, intervalStart, intervalEnd);
+                    channelTransfer.addTransferWithTimestamps(transferBytes, perTransferTime, intervalStart,
+                                                              intervalEnd);
                 }
             }
         }
@@ -236,21 +241,22 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
                 if (transfersThisCh <= 0) continue;
 
                 std::string channelKey = getScaleUpChannelTransferKey(eventComm, peer, (uint8_t)ch, !isColl);
-                double channelStartTs  = op.startTs;
-                double channelEndTs    = op.startTs + networkTime;
-                double channelSpan     = channelEndTs - channelStartTs;
+                AggregatedTransfer& channelTransfer = channelTransfers[channelKey];
+                double channelStartTs               = op.startTs;
+                double channelEndTs                 = op.startTs + networkTime;
+                double channelSpan                  = channelEndTs - channelStartTs;
                 if (channelSpan <= 0.0) continue;
 
                 for (int i = 0; i < transfersThisCh; i++)
                 {
-                    double intervalStart = channelStartTs + (channelSpan * i) / transfersThisCh;
-                    double intervalEnd   = intervalStart + perTransferTime;
+                    const size_t transferBytes = bytesForTransferIndex(inferred, transferIndex++);
+                    double intervalStart       = channelStartTs + (channelSpan * i) / transfersThisCh;
+                    double intervalEnd         = intervalStart + perTransferTime;
                     if (intervalEnd > channelEndTs) intervalEnd = channelEndTs;
 
-                    rankTransfers[rankKey].addTransferWithTimestamps(inferred.perTransferBytes, perTransferTime,
-                                                                     intervalStart, intervalEnd);
-                    channelTransfers[channelKey].addTransferWithTimestamps(inferred.perTransferBytes, perTransferTime,
-                                                                           intervalStart, intervalEnd);
+                    rankTransfer.addTransferWithTimestamps(transferBytes, perTransferTime, intervalStart, intervalEnd);
+                    channelTransfer.addTransferWithTimestamps(transferBytes, perTransferTime, intervalStart,
+                                                              intervalEnd);
                 }
             }
         }

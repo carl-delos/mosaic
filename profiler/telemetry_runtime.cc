@@ -13,6 +13,7 @@
 #include "param.h"
 #include "profiler_otel.h"
 #include "telemetry_internal.h"
+#include "telemetry_primer.h"
 
 // OpenTelemetry includes - only include if available
 #ifdef ENABLE_OTEL
@@ -202,7 +203,7 @@ static void* profiler_otel_telemetry_thread_main(void*)
 
 #ifdef ENABLE_OTEL
         pthread_mutex_lock(&g_commStatesLock);
-        for (auto* commState : g_commStates)
+        for (CommunicatorState* commState : g_commStates)
         {
             if (!commState) continue;
 
@@ -324,7 +325,7 @@ void telemetryRuntimeNotifyWindowReady(CommunicatorState* commState, int window_
 
     pthread_mutex_lock(&g_commStatesLock);
     bool found = false;
-    for (auto* cs : g_commStates)
+    for (CommunicatorState* cs : g_commStates)
     {
         if (cs == commState)
         {
@@ -342,4 +343,31 @@ void telemetryRuntimeNotifyWindowReady(CommunicatorState* commState, int window_
     pthread_mutex_lock(&g_telLock);
     pthread_cond_signal(&g_telCond);
     pthread_mutex_unlock(&g_telLock);
+}
+
+/**
+ * @brief Unregister a communicator from telemetry processing.
+ *
+ * @param[in] commState Communicator state to remove.
+ */
+void telemetryRuntimeUnregisterCommunicator(CommunicatorState* commState)
+{
+    if (!commState)
+    {
+        return;
+    }
+
+    pthread_mutex_lock(&g_commStatesLock);
+    for (auto it = g_commStates.begin(); it != g_commStates.end(); ++it)
+    {
+        if (*it == commState)
+        {
+            g_commStates.erase(it);
+            break;
+        }
+    }
+#ifdef ENABLE_OTEL
+    cleanupTelemetryPrimerStateForCommunicator(commState);
+#endif
+    pthread_mutex_unlock(&g_commStatesLock);
 }

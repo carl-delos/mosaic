@@ -38,17 +38,25 @@ static void exportTransferMetricsPrimer(const std::string& key, const Aggregated
 // Global Primer State Storage
 // =======================================================================================
 
+template <typename T>
+using PrimerBucket = std::map<std::string, PrimerData<T>>;
+
+template <typename T>
+using PrimerStore = std::map<PrimerScopeKey, PrimerBucket<T>>;
+
+using PrimerDoneStore = std::map<PrimerScopeKey, std::set<std::string>>;
+
 // Primer storage for each metric type
-static std::map<PrimerKey, PrimerData<AggregatedCollective>> g_collectivePrimers;
-static std::map<PrimerKey, PrimerData<AggregatedP2P>> g_p2pPrimers;
-static std::map<PrimerKey, PrimerData<AggregatedTransfer>> g_rankPrimers;
-static std::map<PrimerKey, PrimerData<AggregatedTransfer>> g_transferPrimers;
+static PrimerStore<AggregatedCollective> g_collectivePrimers;
+static PrimerStore<AggregatedP2P> g_p2pPrimers;
+static PrimerStore<AggregatedTransfer> g_rankPrimers;
+static PrimerStore<AggregatedTransfer> g_transferPrimers;
 
 // Track keys that have completed the primer cycle (to avoid re-priming on subsequent windows)
-static std::set<PrimerKey> g_collectivePrimersDone;
-static std::set<PrimerKey> g_p2pPrimersDone;
-static std::set<PrimerKey> g_rankPrimersDone;
-static std::set<PrimerKey> g_transferPrimersDone;
+static PrimerDoneStore g_collectivePrimersDone;
+static PrimerDoneStore g_p2pPrimersDone;
+static PrimerDoneStore g_rankPrimersDone;
+static PrimerDoneStore g_transferPrimersDone;
 
 // =======================================================================================
 // Helper Functions
@@ -134,9 +142,21 @@ static AggregatedTransfer mergeAggregatedTransfer(const AggregatedTransfer& a, c
  */
 static bool isScaleUpExecModeKnown(CommunicatorState* commState)
 {
-    auto mode =
+    CommunicatorState::ScaleUpExecMode mode =
         static_cast<CommunicatorState::ScaleUpExecMode>(commState->scaleUpExecMode.load(std::memory_order_acquire));
     return mode != CommunicatorState::ScaleUpExecMode::UNKNOWN;
+}
+
+/**
+ * @brief Build the stable communicator identity used by primer bookkeeping.
+ *
+ * @param[in] commState Communicator state owning the primer data.
+ *
+ * @return Stable communicator identity for primer storage.
+ */
+static PrimerScopeKey makePrimerScopeKey(const CommunicatorState* commState)
+{
+    return PrimerScopeKey{commState ? commState->comm_hash : 0, commState ? commState->rank : -1};
 }
 
 /**
@@ -184,12 +204,13 @@ static std::string describePrimerData(const AggregatedTransfer& data)
  *
  * @return true when the key has already completed primer emission and real-data export.
  */
-static bool isPrimerDone(CommunicatorState* commState, const std::string& key, const std::set<PrimerKey>& donePrimers)
+static bool isPrimerDone(CommunicatorState* commState, const std::string& key, const PrimerDoneStore& donePrimers)
 {
-    return donePrimers.count({commState, key}) > 0;
+    const PrimerScopeKey scope = makePrimerScopeKey(commState);
+    auto doneIt                = donePrimers.find(scope);
+    return doneIt != donePrimers.end() && doneIt->second.count(key) > 0;
 }
 
-template <typename T>
 /**
  * @brief Register a new primer key and seed its accumulated data.
  *
@@ -199,11 +220,11 @@ template <typename T>
  * @param[in,out] primers Primer storage for the metric family.
  * @param[in] metricName Metric-family name used in logs.
  */
-static void registerPrimer(CommunicatorState* commState, const std::string& key, const T& data,
-                           std::map<PrimerKey, PrimerData<T>>& primers, const char* metricName)
+template <typename T>
+static void registerPrimer(CommunicatorState* commState, const std::string& key, const T& data, PrimerStore<T>& primers,
+                           const char* metricName)
 {
-    PrimerKey pkey            = {commState, key};
-    auto& primerData          = primers[pkey];
+    PrimerData<T>& primerData = primers[makePrimerScopeKey(commState)][key];
     primerData.aggregatedData = data;
     primerData.state          = PrimerState::PENDING_PRIMER;
     primerData.windowsWaited  = 0;
@@ -221,7 +242,6 @@ static void registerPrimer(CommunicatorState* commState, const std::string& key,
               key.c_str(), scaleUpMode.c_str(), PRIMER_STABILIZATION_WINDOWS, summary.c_str());
 }
 
-template <typename T, typename MergeFn, typename ExportPrimerFn, typename ExportStandardFn>
 /**
  * @brief Advance pending primers for one metric family through the primer state machine.
  *
@@ -236,26 +256,30 @@ template <typename T, typename MergeFn, typename ExportPrimerFn, typename Export
  *
  * @return Keys from the current window that were consumed by pending primers.
  */
+template <typename T, typename MergeFn, typename ExportPrimerFn, typename ExportStandardFn>
 static std::set<std::string> processPendingPrimers(CommunicatorState* commState,
                                                    const std::map<std::string, T>& currentWindowData,
-                                                   std::map<PrimerKey, PrimerData<T>>& primers,
-                                                   std::set<PrimerKey>& donePrimers, MergeFn mergeFn,
-                                                   ExportPrimerFn exportPrimerFn, ExportStandardFn exportStandardFn,
-                                                   const char* metricName)
+                                                   PrimerStore<T>& primers, PrimerDoneStore& donePrimers,
+                                                   MergeFn mergeFn, ExportPrimerFn exportPrimerFn,
+                                                   ExportStandardFn exportStandardFn, const char* metricName)
 {
     const bool scaleUpModeKnown = isScaleUpExecModeKnown(commState);
     std::set<std::string> handledKeys;
+    const PrimerScopeKey scope = makePrimerScopeKey(commState);
 
-    for (auto it = primers.begin(); it != primers.end();)
+    auto primerScopeIt = primers.find(scope);
+    if (primerScopeIt == primers.end())
     {
-        if (it->first.first != commState)
-        {
-            ++it;
-            continue;
-        }
+        return handledKeys;
+    }
 
-        const std::string& key = it->first.second;
-        auto& primerData       = it->second;
+    PrimerBucket<T>& scopePrimers    = primerScopeIt->second;
+    std::set<std::string>& scopeDone = donePrimers[scope];
+
+    for (auto it = scopePrimers.begin(); it != scopePrimers.end();)
+    {
+        const std::string& key    = it->first;
+        PrimerData<T>& primerData = it->second;
 
         auto currentIt = currentWindowData.find(key);
         if (currentIt != currentWindowData.end())
@@ -331,8 +355,8 @@ static std::set<std::string> processPendingPrimers(CommunicatorState* commState,
             exportStandardFn(key, primerData.aggregatedData, scaleUpMode);
             OTEL_TRACE(NCCL_INIT, "%s REAL DATA EXPORTED: %s (primer complete with scale_up_exec_mode=%s: %s)",
                        metricName, key.c_str(), scaleUpMode.c_str(), updatedSummary.c_str());
-            donePrimers.insert(it->first);
-            it = primers.erase(it);
+            scopeDone.insert(key);
+            it = scopePrimers.erase(it);
         }
         else
         {
@@ -340,7 +364,51 @@ static std::set<std::string> processPendingPrimers(CommunicatorState* commState,
         }
     }
 
+    if (scopePrimers.empty())
+    {
+        primers.erase(primerScopeIt);
+    }
+
+    if (scopeDone.empty())
+    {
+        donePrimers.erase(scope);
+    }
+
     return handledKeys;
+}
+
+/**
+ * @brief Remove pending primer payloads for one communicator from a primer store.
+ *
+ * @tparam T Aggregated metric type stored in the primer map.
+ * @param[in] commState Communicator whose pending primer state should be removed.
+ * @param[in,out] primers Primer store to clean.
+ */
+template <typename T>
+static void cleanupPrimerStoreForCommunicator(CommunicatorState* commState, PrimerStore<T>& primers)
+{
+    if (!commState)
+    {
+        return;
+    }
+
+    primers.erase(makePrimerScopeKey(commState));
+}
+
+/**
+ * @brief Remove completed-primer bookkeeping for one communicator.
+ *
+ * @param[in] commState Communicator whose completed-primer state should be removed.
+ * @param[in,out] donePrimers Completed-primer store to clean.
+ */
+static void cleanupDonePrimerStoreForCommunicator(CommunicatorState* commState, PrimerDoneStore& donePrimers)
+{
+    if (!commState)
+    {
+        return;
+    }
+
+    donePrimers.erase(makePrimerScopeKey(commState));
 }
 
 /**
@@ -585,6 +653,23 @@ void registerTransferPrimer(CommunicatorState* commState, const std::string& key
     registerPrimer(commState, key, data, g_transferPrimers, "Transfer");
 }
 
+/**
+ * @brief Remove all pending and completed primer state for one communicator.
+ *
+ * @param[in] commState Communicator state whose primer state should be discarded.
+ */
+void cleanupTelemetryPrimerStateForCommunicator(CommunicatorState* commState)
+{
+    cleanupPrimerStoreForCommunicator(commState, g_collectivePrimers);
+    cleanupPrimerStoreForCommunicator(commState, g_p2pPrimers);
+    cleanupPrimerStoreForCommunicator(commState, g_rankPrimers);
+    cleanupPrimerStoreForCommunicator(commState, g_transferPrimers);
+    cleanupDonePrimerStoreForCommunicator(commState, g_collectivePrimersDone);
+    cleanupDonePrimerStoreForCommunicator(commState, g_p2pPrimersDone);
+    cleanupDonePrimerStoreForCommunicator(commState, g_rankPrimersDone);
+    cleanupDonePrimerStoreForCommunicator(commState, g_transferPrimersDone);
+}
+
 // =======================================================================================
 // Primer Export Functions (emit zero values using same helpers as real exports)
 // =======================================================================================
@@ -775,6 +860,9 @@ static void exportTransferMetricsPrimer(const std::string& key, const Aggregated
 }
 
 #ifdef UNIT_TESTING
+/**
+ * @brief Reset all primer state used by telemetry unit tests.
+ */
 void resetTelemetryPrimerStateForTests()
 {
     g_collectivePrimers.clear();

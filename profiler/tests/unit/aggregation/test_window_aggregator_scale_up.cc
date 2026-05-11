@@ -136,3 +136,45 @@ TEST_F(WindowAggregatorTest, CudaGraphCommunicatorStillKeepsProxyTransferTiming)
     EXPECT_GT(channelIt->second.totalTimeUs, 0.0);
     EXPECT_FALSE(channelIt->second.intervals.empty());
 }
+
+TEST_F(WindowAggregatorTest, TinyScaleUpCollectivePreservesExactInferredByteTotals)
+{
+    std::unique_ptr<CommunicatorState> commState(new CommunicatorState());
+    commState->nranks     = 8;
+    commState->rank       = 0;
+    commState->comm_hash  = 0;
+    commState->local_rank = 0;
+    commState->hostname   = "test";
+    commState->comm_type  = CommunicatorState::CommType::COLLECTIVE;
+    commState->scaleUpExecMode.store(static_cast<uint8_t>(CommunicatorState::ScaleUpExecMode::NON_CUDA_GRAPH),
+                                     std::memory_order_release);
+
+    auto coll = createCollectiveEventWithCommState("AllReduce", "Ring", "Simple", 2, 4, 100.0, 200.0, commState.get());
+    aggregator->addEvent(coll);
+
+    aggregator->finalize();
+
+    const auto& collectives = aggregator->getCollectives();
+    auto collIt             = collectives.find("Comm0_AllReduce_Ring_Simple_2Chnl");
+    ASSERT_NE(collIt, collectives.end());
+    EXPECT_EQ(28, collIt->second.getTotalTransferCount());
+    EXPECT_EQ(7u, collIt->second.cachedTotalTransferBytes);
+    EXPECT_DOUBLE_EQ(7.0 / 28.0, collIt->second.getAverageTransferSize());
+
+    const auto& rankTransfers = aggregator->getRankTransfers();
+    auto rankIt               = rankTransfers.find("Comm0_Rank0_ToPeer1");
+    ASSERT_NE(rankIt, rankTransfers.end());
+    EXPECT_EQ(28, rankIt->second.count);
+    EXPECT_EQ(7u, rankIt->second.totalBytes);
+
+    const auto& channelTransfers = aggregator->getChannelTransfers();
+    size_t totalChannelBytes     = 0;
+    int totalChannelTransfers    = 0;
+    for (const auto& channelPair : channelTransfers)
+    {
+        totalChannelBytes += channelPair.second.totalBytes;
+        totalChannelTransfers += channelPair.second.count;
+    }
+    EXPECT_EQ(7u, totalChannelBytes);
+    EXPECT_EQ(28, totalChannelTransfers);
+}

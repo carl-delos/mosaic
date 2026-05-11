@@ -209,4 +209,37 @@ TEST_F(TelemetryPrimerStateMachineTest, TransferPrimerForceEmitsAfterMaxWait)
     EXPECT_GT(telemetrytest::getTransferExportCalls()[1].emit.avgSize, 0.0);
     EXPECT_TRUE(isTransferPrimerDone(&commState, key));
 }
+
+TEST_F(TelemetryPrimerStateMachineTest, CommunicatorCleanupRemovesCompletedPrimerState)
+{
+    setScaleUpExecMode(CommunicatorState::ScaleUpExecMode::CUDA_GRAPH);
+
+    const std::string key = "collective_key";
+    registerCollectivePrimer(&commState, key, makeCollective(1024, 20.0, 512, 4.0));
+
+    EXPECT_EQ(1u, processPendingCollectivePrimers(&commState,
+                                                  {
+                                                      {key, makeCollective(2048, 40.0, 1024, 8.0)}
+    })
+                      .count(key));
+    EXPECT_EQ(1u, processPendingCollectivePrimers(&commState,
+                                                  {
+                                                      {key, makeCollective(512, 10.0, 256, 2.0)}
+    })
+                      .count(key));
+    ASSERT_TRUE(isCollectivePrimerDone(&commState, key));
+
+    cleanupTelemetryPrimerStateForCommunicator(&commState);
+
+    EXPECT_FALSE(isCollectivePrimerDone(&commState, key));
+
+    registerCollectivePrimer(&commState, key, makeCollective(256, 5.0, 128, 1.0));
+    EXPECT_EQ(1u, processPendingCollectivePrimers(&commState,
+                                                  {
+                                                      {key, makeCollective(512, 10.0, 256, 2.0)}
+    })
+                      .count(key));
+    ASSERT_EQ(3u, telemetrytest::getCollectiveExportCalls().size());
+    EXPECT_EQ("PRIMER", telemetrytest::getCollectiveExportCalls()[2].exportTag);
+}
 }  // namespace

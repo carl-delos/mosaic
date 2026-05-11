@@ -266,6 +266,7 @@ TEST_F(ScaleUpInferenceCollTest, AllReduce8Ranks4Bytes)
     EXPECT_EQ(r.perTransferBytes, 1u);
     EXPECT_EQ(r.stepsPerRank, 14);
     EXPECT_EQ(r.numTransfers, 28);
+    EXPECT_EQ(r.totalRankBytes, 7u);
 }
 
 TEST_F(ScaleUpInferenceCollTest, AllReduce8Ranks1MB)

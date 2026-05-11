@@ -31,3 +31,13 @@ void profiler_otel_telemetry_notify_window_ready(struct CommunicatorState* commS
 {
     telemetryRuntimeNotifyWindowReady(commState, window_idx);
 }
+
+/**
+ * @brief Unregister a communicator from telemetry processing.
+ *
+ * @param[in] commState Communicator state to remove from telemetry tracking.
+ */
+void profiler_otel_telemetry_unregister_communicator(struct CommunicatorState* commState)
+{
+    telemetryRuntimeUnregisterCommunicator(commState);
+}

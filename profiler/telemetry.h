@@ -12,4 +12,6 @@ void profiler_otel_telemetry_cleanup();
 
 void profiler_otel_telemetry_notify_window_ready(struct CommunicatorState* commState, int window_idx);
 
+void profiler_otel_telemetry_unregister_communicator(struct CommunicatorState* commState);
+
 #endif  // OTEL_TELEMETRY_H_

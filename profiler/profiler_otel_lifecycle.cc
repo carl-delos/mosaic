@@ -110,13 +110,13 @@ static void assignWindowTimeout(CommunicatorState* commState)
  */
 static eventContext* createEventContext(uint64_t commId, const char* commName, int nNodes, int nranks, int rank)
 {
-    auto* ctx      = static_cast<eventContext*>(calloc(1, sizeof(eventContext)));
-    ctx->commName  = commName;
-    ctx->commHash  = commId;
-    ctx->nNodes    = nNodes;
-    ctx->nranks    = nranks;
-    ctx->rank      = rank;
-    ctx->commState = new CommunicatorState();
+    eventContext* ctx = static_cast<eventContext*>(calloc(1, sizeof(eventContext)));
+    ctx->commName     = commName;
+    ctx->commHash     = commId;
+    ctx->nNodes       = nNodes;
+    ctx->nranks       = nranks;
+    ctx->rank         = rank;
+    ctx->commState    = new CommunicatorState();
 
     ctx->commState->comm_name = commName;
     ctx->commState->comm_hash = commId;
@@ -186,10 +186,11 @@ ncclResult_t initializeProfilerContext(void** context, uint64_t commId, int* eAc
  */
 ncclResult_t finalizeProfilerContext(void* context)
 {
-    auto* ctx = static_cast<eventContext*>(context);
+    eventContext* ctx = static_cast<eventContext*>(context);
 
     if (ctx && ctx->commState)
     {
+        profiler_otel_telemetry_unregister_communicator(ctx->commState);
         OTEL_INFO(NCCL_INIT, "Destroying communicator state: name=%s, hash=%lu", ctx->commState->comm_name,
                   ctx->commState->comm_hash);
         delete ctx->commState;

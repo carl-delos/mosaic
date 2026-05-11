@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include "aggregation.h"
@@ -59,12 +60,23 @@ struct PrimerData
 };
 
 /**
- * @brief Primer key: (CommunicatorState*, operation_key_string)
- *
- * The CommunicatorState* identifies the specific communicator context.
- * The operation_key_string is the Grafana-visible collective name (e.g., "Comm<hash>_AllReduce_RING_LL_1Chnl").
+ * @brief Stable communicator identity for primer bookkeeping.
  */
-using PrimerKey = std::pair<CommunicatorState*, std::string>;
+struct PrimerScopeKey
+{
+    uint64_t commHash;
+    int rank;
+
+    bool operator<(const PrimerScopeKey& other) const
+    {
+        return std::tie(commHash, rank) < std::tie(other.commHash, other.rank);
+    }
+};
+
+/**
+ * @brief Primer key: (stable communicator identity, operation_key_string)
+ */
+using PrimerKey = std::pair<PrimerScopeKey, std::string>;
 
 #ifdef ENABLE_OTEL
 
@@ -95,6 +107,8 @@ void registerRankPrimer(CommunicatorState* commState, const std::string& key, co
 bool isTransferPrimerDone(CommunicatorState* commState, const std::string& key);
 
 void registerTransferPrimer(CommunicatorState* commState, const std::string& key, const AggregatedTransfer& data);
+
+void cleanupTelemetryPrimerStateForCommunicator(CommunicatorState* commState);
 
 #ifdef UNIT_TESTING
 void resetTelemetryPrimerStateForTests();
