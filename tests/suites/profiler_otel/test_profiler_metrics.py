@@ -11,6 +11,7 @@ import time
 import pytest
 import requests
 
+from profiler_otel.conftest import expected_nccl_profiler_metrics
 from vllm import InferenceResult
 from workload.workload import WorkloadStatus
 
@@ -81,14 +82,14 @@ class TestNCCLProfilerTelemetry:
         self,
         workload,
         prometheus_url: str,
-        nccl_profiler_metrics: list[str],
     ):
         """
         :title: Telemetry - NCCL metrics exported after inference
         :suite: profiler_otel
         :description: Verify NCCL profiler metrics are exported to Prometheus after
             running vLLM inference. Triggers NCCL operations via inference, then
-            queries Prometheus for all metrics defined in telemetry.cc.
+            queries Prometheus for the workload-specific expected metric set from
+            conftest (NCCL_PROFILER_METRICS_EXPECTED_*).
         """
 
         workload.start()
@@ -118,6 +119,7 @@ class TestNCCLProfilerTelemetry:
 
         found_metrics = []
         missing_metrics = []
+        nccl_profiler_metrics = expected_nccl_profiler_metrics(workload)
 
         for metric_name in nccl_profiler_metrics:
             try:

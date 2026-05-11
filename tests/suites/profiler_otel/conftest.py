@@ -37,51 +37,68 @@ DEFAULT_PROMETHEUS_PORT = 9090
 # Counters get _total suffix, Histograms get _bucket/_count/_sum suffixes,
 # and units are expanded (us -> microseconds, bytes -> bytes).
 # Using _total for counters and _sum for histograms as primary validation.
-# NCCL_PROFILER_METRICS = [
-#     # Collective Information metrics
-#     "nccl_profiler_collective_bytes_total",  # Counter (bytes)
-#     "nccl_profiler_collective_time_microseconds_sum",  # Histogram (us)
-#     "nccl_profiler_collective_count_sum",  # Histogram (count)
-#     "nccl_profiler_collective_num_transfers_sum",  # Histogram (count)
-#     "nccl_profiler_collective_transfer_size_bytes_sum",  # Histogram (bytes)
-#     "nccl_profiler_collective_transfer_time_microseconds_sum",  # Histogram (us)
-#     # P2P Information metrics
-#     "nccl_profiler_p2p_bytes_bytes_sum",  # Histogram (bytes)
-#     "nccl_profiler_p2p_time_microseconds_sum",  # Histogram (us)
-#     "nccl_profiler_p2p_num_transfers_sum",  # Histogram (count)
-#     "nccl_profiler_p2p_transfer_size_bytes_sum",  # Histogram (bytes)
-#     "nccl_profiler_p2p_transfer_time_microseconds_sum",  # Histogram (us)
-#     # Rank Information metrics
-#     "nccl_profiler_rank_bytes_total",  # Counter (bytes)
-#     "nccl_profiler_rank_latency_microseconds_sum",  # Histogram (us)
-#     "nccl_profiler_rank_rate_sum",  # Histogram (MB/s)
-#     # Transfer Information metrics
-#     "nccl_profiler_transfer_size_bytes_sum",  # Histogram (bytes)
-#     "nccl_profiler_transfer_time_microseconds_sum",  # Histogram (us)
-#     "nccl_profiler_transfer_latency_microseconds_sum",  # Histogram (us)
-# ]
-
 NCCL_PROFILER_METRICS = [
     # Collective Information metrics
     "nccl_profiler_collective_bytes_total",  # Counter (bytes)
     "nccl_profiler_collective_time_microseconds_sum",  # Histogram (us)
     "nccl_profiler_collective_count_sum",  # Histogram (count)
+    "nccl_profiler_collective_num_transfers_sum",  # Histogram (count)
+    "nccl_profiler_collective_transfer_size_bytes_sum",  # Histogram (bytes)
+    "nccl_profiler_collective_transfer_time_microseconds_sum",  # Histogram (us)
+    # P2P Information metrics
+    "nccl_profiler_p2p_bytes_bytes_sum",  # Histogram (bytes)
+    "nccl_profiler_p2p_time_microseconds_sum",  # Histogram (us)
+    "nccl_profiler_p2p_num_transfers_sum",  # Histogram (count)
+    "nccl_profiler_p2p_transfer_size_bytes_sum",  # Histogram (bytes)
+    "nccl_profiler_p2p_transfer_time_microseconds_sum",  # Histogram (us)
+    # Rank Information metrics
+    "nccl_profiler_rank_bytes_total",  # Counter (bytes)
+    "nccl_profiler_rank_latency_microseconds_sum",  # Histogram (us)
+    "nccl_profiler_rank_rate_sum",  # Histogram (MB/s)
+    # Transfer Information metrics
+    "nccl_profiler_transfer_size_bytes_sum",  # Histogram (bytes)
+    "nccl_profiler_transfer_time_microseconds_sum",  # Histogram (us)
+    "nccl_profiler_transfer_latency_microseconds_sum",  # Histogram (us)
 ]
+
+# Expected metrics based on workload type.
+NCCL_PROFILER_METRICS_EXPECTED_PROMPT_WORKLOAD = [
+    "nccl_profiler_collective_bytes_total",
+    "nccl_profiler_collective_time_microseconds_sum",
+    "nccl_profiler_collective_count_sum",
+    "nccl_profiler_collective_transfer_size_bytes_sum",
+    "nccl_profiler_collective_transfer_time_microseconds_sum",
+    "nccl_profiler_rank_bytes_total",
+    "nccl_profiler_transfer_size_bytes_sum",
+    "nccl_profiler_transfer_time_microseconds_sum",
+]
+
+NCCL_PROFILER_METRICS_EXPECTED_INFERENCEX_WORKLOAD = [
+    "nccl_profiler_collective_bytes_total",
+    "nccl_profiler_collective_time_microseconds_sum",
+    "nccl_profiler_collective_count_sum",
+    "nccl_profiler_collective_transfer_size_bytes_sum",
+    "nccl_profiler_collective_transfer_time_microseconds_sum",
+    "nccl_profiler_rank_bytes_total",
+    "nccl_profiler_rank_latency_microseconds_sum",
+    "nccl_profiler_transfer_size_bytes_sum",
+    "nccl_profiler_transfer_time_microseconds_sum",
+    "nccl_profiler_transfer_latency_microseconds_sum",
+]
+
+
+def expected_nccl_profiler_metrics(workload) -> list[str]:
+    """Return the NCCL profiler metric names we assert on for this workload type."""
+    if isinstance(workload, PromptWorkload):
+        return NCCL_PROFILER_METRICS_EXPECTED_PROMPT_WORKLOAD
+    if isinstance(workload, InferencexWorkload):
+        return NCCL_PROFILER_METRICS_EXPECTED_INFERENCEX_WORKLOAD
+    raise TypeError(f"Unsupported workload type: {type(workload)!r}")
 
 
 # =============================================================================
 # OTEL Stack Fixtures
 # =============================================================================
-
-
-@pytest.fixture(scope="session")
-def nccl_profiler_metrics() -> list[str]:
-    """
-    Provide the list of NCCL profiler metric names.
-
-    These are all metrics defined in telemetry.cc initializeOtelMetrics().
-    """
-    return NCCL_PROFILER_METRICS
 
 
 @pytest.fixture(scope="session")
