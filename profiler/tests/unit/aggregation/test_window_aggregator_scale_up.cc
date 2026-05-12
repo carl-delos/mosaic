@@ -178,3 +178,38 @@ TEST_F(WindowAggregatorTest, TinyScaleUpCollectivePreservesExactInferredByteTota
     EXPECT_EQ(7u, totalChannelBytes);
     EXPECT_EQ(28, totalChannelTransfers);
 }
+
+TEST_F(WindowAggregatorTest, MultiChannelScaleUpUsesChannelLocalTransferTime)
+{
+    std::unique_ptr<CommunicatorState> commState(new CommunicatorState());
+    commState->nranks     = 4;
+    commState->rank       = 0;
+    commState->comm_hash  = 0;
+    commState->local_rank = 0;
+    commState->hostname   = "test";
+    commState->comm_type  = CommunicatorState::CommType::COLLECTIVE;
+    commState->scaleUpExecMode.store(static_cast<uint8_t>(CommunicatorState::ScaleUpExecMode::NON_CUDA_GRAPH),
+                                     std::memory_order_release);
+
+    auto coll =
+        createCollectiveEventWithCommState("AllReduce", "Ring", "Simple", 2, 4096, 100.0, 160.0, commState.get());
+    aggregator->addEvent(coll);
+    aggregator->addEvent(createKernelChEvent(0, 1111, 2222, 100.0, 160.0, &coll));
+    aggregator->addEvent(createKernelChEvent(1, 1111, 2222, 100.0, 160.0, &coll));
+
+    aggregator->finalize();
+
+    const auto& collectives = aggregator->getCollectives();
+    auto collIt             = collectives.find("Comm0_AllReduce_Ring_Simple_2Chnl");
+    ASSERT_NE(collIt, collectives.end());
+    EXPECT_EQ(12, collIt->second.getTotalTransferCount());
+    EXPECT_NEAR(10.0, collIt->second.getAverageTransferTime(), 1e-9);
+
+    const auto& channelTransfers = aggregator->getChannelTransfers();
+    ASSERT_EQ(2u, channelTransfers.size());
+    for (const auto& channelPair : channelTransfers)
+    {
+        EXPECT_EQ(6, channelPair.second.count);
+        EXPECT_NEAR(10.0, channelPair.second.getAverageTime(), 1e-9);
+    }
+}
