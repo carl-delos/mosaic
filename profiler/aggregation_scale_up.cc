@@ -186,8 +186,9 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
             if (inferred.networkTimeFraction > 0.0 && inferred.numTransfers > 0)
             {
                 const double networkTime = collectiveTimeUs * inferred.networkTimeFraction;
-                const int activeChannels = std::min(inferred.numTransfers, inferred.numChannels > 0 ? inferred.numChannels : 1);
-                averageTransferTime      = (networkTime * activeChannels) / inferred.numTransfers;
+                const int activeChannels =
+                    std::min(inferred.numTransfers, inferred.numChannels > 0 ? inferred.numChannels : 1);
+                averageTransferTime = (networkTime * activeChannels) / inferred.numTransfers;
             }
 
             recordTransferCacheBatch(op, inferred.numTransfers, inferred.totalRankBytes, averageTransferTime);
@@ -201,17 +202,17 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
             continue;
         }
 
-        const double networkTime = collectiveTimeUs * inferred.networkTimeFraction;
+        const double networkTime           = collectiveTimeUs * inferred.networkTimeFraction;
         const otelEventHandle_t* eventPtr  = static_cast<const otelEventHandle_t*>(opHandle);
         const CommunicatorState* eventComm = eventPtr ? eventPtr->commState : nullptr;
         int peer                           = op.peer;
         std::string rankKey                = getScaleUpRankTransferKey(eventComm, peer, !isColl);
         AggregatedTransfer& rankTransfer   = rankTransfers[rankKey];
 
-        int nCh                   = inferred.numChannels > 0 ? inferred.numChannels : 1;
-        int base                  = inferred.numTransfers / nCh;
-        int rem                   = inferred.numTransfers % nCh;
-        int transferIndex         = 0;
+        int nCh                    = inferred.numChannels > 0 ? inferred.numChannels : 1;
+        int base                   = inferred.numTransfers / nCh;
+        int rem                    = inferred.numTransfers % nCh;
+        int transferIndex          = 0;
         double totalTransferTimeUs = 0.0;
 
         for (int ch = 0; ch < nCh; ch++)
@@ -238,8 +239,8 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
             if (channelSpan <= 0.0) continue;
 
             totalTransferTimeUs += channelSpan;
-            const double channelTransferTime = channelSpan / transfersThisCh;
-            std::string channelKey           = getScaleUpChannelTransferKey(eventComm, peer, (uint8_t)ch, !isColl);
+            const double channelTransferTime    = channelSpan / transfersThisCh;
+            std::string channelKey              = getScaleUpChannelTransferKey(eventComm, peer, (uint8_t)ch, !isColl);
             AggregatedTransfer& channelTransfer = channelTransfers[channelKey];
 
             for (int i = 0; i < transfersThisCh; i++)
@@ -255,8 +256,9 @@ void WindowAggregator::finalizeScaleUpOperations(std::map<const void*, InProgres
             }
         }
 
-        const double averageTransferTime =
-            (inferred.numTransfers > 0 && totalTransferTimeUs > 0.0) ? (totalTransferTimeUs / inferred.numTransfers) : 0.0;
+        const double averageTransferTime = (inferred.numTransfers > 0 && totalTransferTimeUs > 0.0)
+                                               ? (totalTransferTimeUs / inferred.numTransfers)
+                                               : 0.0;
         recordTransferCacheBatch(op, inferred.numTransfers, inferred.totalRankBytes, averageTransferTime);
 
         OTEL_TRACE(NCCL_INIT,

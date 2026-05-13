@@ -93,8 +93,8 @@ size_t inferChunkedTransferSize(size_t bytesPerPath, int& slicesPerChunk, int& n
         bytesPerPath /= 2;
     }
 
-    numSubTransfers     = 1;
-    size_t perTransfer  = bytesPerPath;
+    numSubTransfers    = 1;
+    size_t perTransfer = bytesPerPath;
     if (bytesPerPath > SCALE_UP_MAX_TRANSFER_BYTES)
     {
         numSubTransfers = (int)std::ceil((double)bytesPerPath / SCALE_UP_MAX_TRANSFER_BYTES);
@@ -191,10 +191,10 @@ InferredTransfers inferCollectiveTransfers(const char* func, const char* algo, s
     }
 
     const bool isDirectChunked = (algoFamily == ScaleUpAlgoFamily::DirectChunked);
-    size_t bytesPerPath = isDirectChunked ? (nBytesGlobal / (size_t)result.numChannels)
-                                          : (nBytesGlobal / (size_t)nRanks / (size_t)result.numChannels);
+    size_t bytesPerPath        = isDirectChunked ? (nBytesGlobal / (size_t)result.numChannels)
+                                                 : (nBytesGlobal / (size_t)nRanks / (size_t)result.numChannels);
 
-    int slicesPerChunk = 1;
+    int slicesPerChunk  = 1;
     int numSubTransfers = 1;
     size_t perTransfer  = inferChunkedTransferSize(bytesPerPath, slicesPerChunk, numSubTransfers);
 
@@ -206,7 +206,7 @@ InferredTransfers inferCollectiveTransfers(const char* func, const char* algo, s
         return result;
     }
 
-    result.numTransfers     = stepsPerRank * result.numChannels * slicesPerChunk * numSubTransfers;
+    result.numTransfers = stepsPerRank * result.numChannels * slicesPerChunk * numSubTransfers;
     return result;
 }
 
