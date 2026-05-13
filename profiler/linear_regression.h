@@ -5,9 +5,9 @@
 #define LINEAR_REGRESSION_H_
 
 #include <map>
+#include <set>
 #include <string>
 #include <utility>  // For std::pair
-#include <vector>
 
 /**
  * Simple linear regression class for computing latency from transfer data.
@@ -51,9 +51,9 @@ public:
 
 private:
     Mode mode_;
-    std::vector<std::pair<double, double>> dataPoints;
+    std::set<double> uniqueSizes;
     std::map<double, double> minTimesPerSize;  // For MIN mode: size -> min time
-    double sumX, sumY, sumXY, sumX2;
+    double sumX, sumY, sumXY, sumX2, sumY2;
     int n;
 };
 

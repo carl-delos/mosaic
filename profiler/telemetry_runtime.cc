@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+
 #include "communicator_state.h"
 #include "param.h"
 #include "profiler_otel.h"
@@ -176,6 +180,10 @@ static void initializeOtelMetrics()
 static void* profiler_otel_telemetry_thread_main(void*)
 {
     OTEL_TRACE(NCCL_INIT, "==> profiler_otel_telemetry_thread_main()");
+
+#ifdef __linux__
+    (void)prctl(PR_SET_NAME, "nccl-prof-tel", 0, 0, 0);
+#endif
 
     int interval = (int)OTEL_GET_PARAM(TelemetryIntervalSec);
     if (interval <= 0)

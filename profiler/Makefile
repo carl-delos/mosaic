@@ -36,6 +36,14 @@ else
   COVERAGE_FLAG := ON
 endif
 
+# Allow `make PROFILE=1` to add frame pointers and debug info for perf sampling.
+PROFILE ?= 0
+ifeq ($(filter 1 ON on true TRUE yes YES,$(PROFILE)),)
+	PROFILE_FLAG := OFF
+else
+	PROFILE_FLAG := ON
+endif
+
 COVERAGE_BUILD_DIR = tests/build-coverage
 
 # ROCm path (default: /opt/rocm)
@@ -68,9 +76,9 @@ $(BUILD_DIR)/Makefile: CMakeLists.txt
 		echo "WARNING: NCCL_PATH is not set. Set NCCL_PATH to your NCCL/RCCL source/build tree (or source config.local)."; \
 	fi
 	@if [ -n "$(OTEL_PATH)" ]; then \
-		cd $(BUILD_DIR) && cmake .. $(CMAKE_FLAGS) -DNCCL_PATH=$(NCCL_PATH) -DTRACE=$(TRACE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG) -DOTEL_PATH=$(OTEL_PATH); \
+		cd $(BUILD_DIR) && cmake .. $(CMAKE_FLAGS) -DNCCL_PATH=$(NCCL_PATH) -DTRACE=$(TRACE_FLAG) -DPROFILER_ENABLE_SAMPLING_PROFILE=$(PROFILE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG) -DOTEL_PATH=$(OTEL_PATH); \
 	else \
-		cd $(BUILD_DIR) && cmake .. $(CMAKE_FLAGS) -DNCCL_PATH=$(NCCL_PATH) -DTRACE=$(TRACE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG); \
+		cd $(BUILD_DIR) && cmake .. $(CMAKE_FLAGS) -DNCCL_PATH=$(NCCL_PATH) -DTRACE=$(TRACE_FLAG) -DPROFILER_ENABLE_SAMPLING_PROFILE=$(PROFILE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG); \
 	fi
 
 .PHONY: build
@@ -104,9 +112,9 @@ $(TEST_BUILD_DIR)/Makefile: tests/CMakeLists.txt
 		echo "WARNING: NCCL_PATH is not set. Tests may not compile correctly (or source config.local)."; \
 	fi
 	@if [ -n "$(NCCL_PATH)" ]; then \
-		cd $(TEST_BUILD_DIR) && cmake .. -DNCCL_PATH=$(NCCL_PATH) -DTRACE=$(TRACE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG); \
+		cd $(TEST_BUILD_DIR) && cmake .. -DNCCL_PATH=$(NCCL_PATH) -DTRACE=$(TRACE_FLAG) -DPROFILER_ENABLE_SAMPLING_PROFILE=$(PROFILE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG); \
 	else \
-		cd $(TEST_BUILD_DIR) && cmake .. -DTRACE=$(TRACE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG); \
+		cd $(TEST_BUILD_DIR) && cmake .. -DTRACE=$(TRACE_FLAG) -DPROFILER_ENABLE_SAMPLING_PROFILE=$(PROFILE_FLAG) -DGPU_PLATFORM=$(GPU_PLATFORM) $(ROCM_PATH_CMAKE_ARG); \
 	fi
 
 .PHONY: test-build
@@ -215,6 +223,7 @@ help:
 	@echo "  CMAKE_FLAGS    - Additional CMake flags (default: $(CMAKE_FLAGS))"
 	@echo "  TRACE          - Enable trace logging (default: $(TRACE), 0=off, 1=on)"
 	@echo "  COVERAGE       - Enable test coverage instrumentation (default: $(COVERAGE), 0=off, 1=on)"
+	@echo "  PROFILE        - Enable frame pointers/debug info for perf sampling (default: $(PROFILE), 0=off, 1=on)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make                                      # Build with auto-detected platform"
@@ -223,6 +232,7 @@ help:
 	@echo "  make GPU_PLATFORM=CUDA                    # Force CUDA platform"
 	@echo "  make OTEL_PATH=/opt/opentelemetry-build   # Use custom OpenTelemetry installation"
 	@echo "  make CMAKE_FLAGS=-DCMAKE_BUILD_TYPE=Debug # Debug build"
+	@echo "  make PROFILE=1 build test                 # Build plugin/tests for perf profiling"
 	@echo "  make test                                 # Build and run unit tests"
 	@echo "  make coverage                             # Build and run tests with coverage report"
 	@echo "  make clean                                # Clean all build artifacts"

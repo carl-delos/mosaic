@@ -155,6 +155,18 @@ function(profiler_configure_trace log_prefix enabled_message disabled_message)
     endif()
 endfunction()
 
+function(profiler_configure_sampling_profile log_prefix)
+    option(PROFILER_ENABLE_SAMPLING_PROFILE
+           "Build with frame pointers and debug info for low-overhead perf sampling"
+           OFF)
+    if(PROFILER_ENABLE_SAMPLING_PROFILE)
+        add_compile_options(-fno-omit-frame-pointer -fno-optimize-sibling-calls -g)
+        message(STATUS "${log_prefix}Sampling profiler support enabled (-g -fno-omit-frame-pointer)")
+    else()
+        message(STATUS "${log_prefix}Sampling profiler support disabled")
+    endif()
+endfunction()
+
 function(_profiler_require_existing_path description path_value)
     if(NOT EXISTS "${path_value}")
         message(FATAL_ERROR "${description} not found: ${path_value}")

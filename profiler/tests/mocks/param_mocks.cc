@@ -5,7 +5,7 @@
 
 const char* ncclParamLinearRegressionMode()
 {
-    return "MIN";
+    return "AVG";
 }
 
 int64_t ncclParamScaleUpNetworkPct()

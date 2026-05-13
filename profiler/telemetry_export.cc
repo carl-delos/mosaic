@@ -8,10 +8,201 @@
 #include <opentelemetry/context/context.h>
 #include <opentelemetry/metrics/sync_instruments.h>
 
-#include <map>
+#include <array>
 #include <string>
+#include <string_view>
 
 #include "profiler_otel.h"
+
+namespace common = opentelemetry::common;
+
+namespace
+{
+using Attribute = std::pair<nostd::string_view, common::AttributeValue>;
+
+/**
+ * @brief Convert a standard string view into an OpenTelemetry string view.
+ *
+ * @param[in] value Source string view.
+ *
+ * @return Non-owning OpenTelemetry view of the same characters.
+ */
+static inline nostd::string_view makeView(std::string_view value)
+{
+    return nostd::string_view{value.data(), value.size()};
+}
+
+/**
+ * @brief Convert a standard string into an OpenTelemetry string view.
+ *
+ * @param[in] value Source string.
+ *
+ * @return Non-owning OpenTelemetry view of the same characters.
+ */
+static inline nostd::string_view makeView(const std::string& value)
+{
+    return nostd::string_view{value.data(), value.size()};
+}
+
+/**
+ * @brief Build a string-valued OpenTelemetry attribute from a string view.
+ *
+ * @param[in] key Attribute name.
+ * @param[in] value Attribute value.
+ *
+ * @return Attribute pair ready for metric emission.
+ */
+static inline Attribute makeStringAttribute(const char* key, std::string_view value)
+{
+    return {nostd::string_view{key}, common::AttributeValue{makeView(value)}};
+}
+
+/**
+ * @brief Build a string-valued OpenTelemetry attribute from a standard string.
+ *
+ * @param[in] key Attribute name.
+ * @param[in] value Attribute value.
+ *
+ * @return Attribute pair ready for metric emission.
+ */
+static inline Attribute makeStringAttribute(const char* key, const std::string& value)
+{
+    return {nostd::string_view{key}, common::AttributeValue{makeView(value)}};
+}
+
+/**
+ * @brief Build a string-valued OpenTelemetry attribute from a C string.
+ *
+ * @param[in] key Attribute name.
+ * @param[in] value Attribute value.
+ *
+ * @return Attribute pair ready for metric emission.
+ */
+static inline Attribute makeStringAttribute(const char* key, const char* value)
+{
+    return {nostd::string_view{key}, common::AttributeValue{nostd::string_view{value}}};
+}
+
+/**
+ * @brief Parsed components extracted from rank and channel transfer keys.
+ */
+struct ParsedLinkKey
+{
+    std::string_view communicator;
+    std::string_view channel;
+    std::string sourceRank;
+    std::string destRank;
+    std::string_view metricCommType;
+};
+
+/**
+ * @brief Parse a rank or channel transfer aggregation key into export labels.
+ *
+ * @param[in] key Aggregation key emitted by the window aggregator.
+ * @param[in] commType Default communicator type for the current communicator.
+ * @param[in] includeChannel Whether to extract an optional channel suffix.
+ *
+ * @return Parsed communicator, rank, channel, and metric-type fields.
+ */
+static ParsedLinkKey parseLinkKey(const std::string& key, const std::string& commType, bool includeChannel)
+{
+    ParsedLinkKey parts;
+    parts.metricCommType = std::string_view{commType};
+
+    std::string_view keyView{key};
+    size_t commPos     = keyView.find("Comm");
+    size_t firstSep    = keyView.find('_', commPos + 4);
+    size_t pipelinePos = keyView.find("_Pipeline");
+    size_t peerPos     = keyView.find("_ToPeer");
+    size_t chnlPos     = includeChannel ? keyView.find("_Chnl") : std::string_view::npos;
+
+    if (commPos != std::string_view::npos && firstSep != std::string_view::npos)
+    {
+        parts.communicator = keyView.substr(commPos + 4, firstSep - commPos - 4);
+    }
+
+    if (pipelinePos != std::string_view::npos && peerPos == std::string_view::npos)
+    {
+        size_t srcStart = pipelinePos + 9;
+        size_t toPos    = keyView.find("_ToPipeline", srcStart);
+        if (toPos != std::string_view::npos)
+        {
+            std::string_view srcPipeline = keyView.substr(srcStart, toPos - srcStart);
+            size_t dstStart              = toPos + 11;
+            size_t dstEnd                = (chnlPos != std::string_view::npos) ? chnlPos : keyView.size();
+            std::string_view dstPipeline = keyView.substr(dstStart, dstEnd - dstStart);
+
+            parts.sourceRank.reserve(8 + srcPipeline.size());
+            parts.sourceRank.append("Pipeline");
+            parts.sourceRank.append(srcPipeline);
+
+            parts.destRank.reserve(8 + dstPipeline.size());
+            parts.destRank.append("Pipeline");
+            parts.destRank.append(dstPipeline);
+
+            parts.metricCommType = "P2P";
+        }
+    }
+    else if (peerPos != std::string_view::npos)
+    {
+        size_t rankPos = keyView.find("_Rank");
+        if (rankPos != std::string_view::npos)
+        {
+            size_t sourceStart = rankPos + 5;
+            parts.sourceRank.assign(keyView.substr(sourceStart, peerPos - sourceStart));
+        }
+
+        size_t destStart = peerPos + 7;
+        size_t destEnd   = (chnlPos != std::string_view::npos) ? chnlPos : keyView.size();
+        parts.destRank.assign(keyView.substr(destStart, destEnd - destStart));
+        parts.metricCommType = "COLLECTIVE";
+    }
+
+    if (chnlPos != std::string_view::npos)
+    {
+        parts.channel = keyView.substr(chnlPos + 5);
+    }
+
+    return parts;
+}
+
+/**
+ * @brief Build the human-readable P2P operation label from an aggregation key.
+ *
+ * @param[in] key P2P aggregation key.
+ *
+ * @return Operation label in the form `PipelineX -> PipelineY`.
+ */
+static std::string makeP2POperationLabel(const std::string& key)
+{
+    std::string_view keyView{key};
+    std::string_view srcPipeline;
+    std::string_view dstPipeline;
+
+    size_t pipelinePos = keyView.find("_Pipeline");
+    if (pipelinePos != std::string_view::npos)
+    {
+        size_t srcStart = pipelinePos + 9;
+        size_t toPos    = keyView.find("ToPipeline", srcStart);
+        if (toPos != std::string_view::npos)
+        {
+            srcPipeline     = keyView.substr(srcStart, toPos - srcStart);
+            size_t dstStart = toPos + 10;
+            size_t dstEnd   = keyView.find('_', dstStart);
+            dstPipeline     = (dstEnd != std::string_view::npos) ? keyView.substr(dstStart, dstEnd - dstStart)
+                                                                 : keyView.substr(dstStart);
+        }
+    }
+
+    std::string operation;
+    operation.reserve(24 + srcPipeline.size() + dstPipeline.size());
+    operation.append("Pipeline");
+    operation.append(srcPipeline);
+    operation.append(" -> Pipeline");
+    operation.append(dstPipeline);
+    return operation;
+}
+}  // namespace
 
 /**
  * @brief Export collective operation metrics to OpenTelemetry.
@@ -40,6 +231,7 @@ void exportCollectiveMetrics(const std::string& key, const CollectiveEmitView& e
     std::string rank_str       = std::to_string(rank);
     std::string local_rank_str = std::to_string(local_rank);
     std::string communicator   = std::to_string(comm_hash);
+    std::string nranks_str     = std::to_string(nranks);
 
     if (eligibility.export_core)
     {
@@ -49,30 +241,31 @@ void exportCollectiveMetrics(const std::string& key, const CollectiveEmitView& e
                    export_tag, key.c_str(), emit.count, emit.totalBytes, emit.totalTimeUs, emit.avgBytes,
                    emit.avgTimeUs);
 
-        std::map<std::string, std::string> labels = {
-            {"communicator",       communicator          },
-            {"operation",          key                   },
-            {"rank",               rank_str              },
-            {"hostname",           hostname              },
-            {"local_rank",         local_rank_str        },
-            {"gpu_pci_bus_id",     gpu_pci_bus_id        },
-            {"gpu_uuid",           gpu_uuid              },
-            {"comm_type",          "COLLECTIVE"          },
-            {"comm_nranks",        std::to_string(nranks)},
-            {"scale_up_exec_mode", scale_up_exec_mode    }
+        const auto context               = opentelemetry::context::Context{};
+        std::array<Attribute, 10> labels = {
+            makeStringAttribute("communicator", communicator),
+            makeStringAttribute("operation", key),
+            makeStringAttribute("rank", rank_str),
+            makeStringAttribute("hostname", hostname),
+            makeStringAttribute("local_rank", local_rank_str),
+            makeStringAttribute("gpu_pci_bus_id", gpu_pci_bus_id),
+            makeStringAttribute("gpu_uuid", gpu_uuid),
+            makeStringAttribute("comm_type", "COLLECTIVE"),
+            makeStringAttribute("comm_nranks", nranks_str),
+            makeStringAttribute("scale_up_exec_mode", scale_up_exec_mode),
         };
 
-        g_collBytesCounter->Add(emit.totalBytes, labels, opentelemetry::context::Context{});
-        g_collTimeHist->Record(emit.avgTimeUs, labels, opentelemetry::context::Context{});
-        g_collCountHist->Record((double)emit.count, labels, opentelemetry::context::Context{});
+        g_collBytesCounter->Add(emit.totalBytes, labels, context);
+        g_collTimeHist->Record(emit.avgTimeUs, labels, context);
+        g_collCountHist->Record((double)emit.count, labels, context);
 
         if (eligibility.export_transfers)
         {
-            g_collNumTransfersHist->Record(emit.avgNumTransfers, labels, opentelemetry::context::Context{});
-            g_collTransferSizeHist->Record(emit.avgTransferSize, labels, opentelemetry::context::Context{});
+            g_collNumTransfersHist->Record(emit.avgNumTransfers, labels, context);
+            g_collTransferSizeHist->Record(emit.avgTransferSize, labels, context);
             if (eligibility.export_transfer_time)
             {
-                g_collTransferTimeHist->Record(emit.avgTransferTime, labels, opentelemetry::context::Context{});
+                g_collTransferTimeHist->Record(emit.avgTransferTime, labels, context);
             }
 
             OTEL_TRACE(NCCL_INIT,
@@ -115,51 +308,35 @@ void exportP2PMetrics(const std::string& key, const P2PEmitView& emit, const P2P
     std::string rank_str       = std::to_string(rank);
     std::string local_rank_str = std::to_string(local_rank);
     std::string communicator   = std::to_string(comm_hash);
-
-    std::string src_pipeline = "";
-    std::string dst_pipeline = "";
-    size_t pipeline_pos      = key.find("_Pipeline");
-    if (pipeline_pos != std::string::npos)
-    {
-        size_t src_start = pipeline_pos + 9;
-        size_t to_pos    = key.find("ToPipeline", src_start);
-        if (to_pos != std::string::npos)
-        {
-            src_pipeline     = key.substr(src_start, to_pos - src_start);
-            size_t dst_start = to_pos + 10;
-            size_t dst_end   = key.find("_", dst_start);
-            dst_pipeline =
-                (dst_end != std::string::npos) ? key.substr(dst_start, dst_end - dst_start) : key.substr(dst_start);
-        }
-    }
-
-    std::string operation = "Pipeline" + src_pipeline + " -> Pipeline" + dst_pipeline;
+    std::string nranks_str     = std::to_string(nranks);
+    std::string operation      = makeP2POperationLabel(key);
 
     if (eligibility.export_core)
     {
-        std::map<std::string, std::string> labels = {
-            {"communicator",       communicator          },
-            {"operation",          operation             },
-            {"rank",               rank_str              },
-            {"hostname",           hostname              },
-            {"local_rank",         local_rank_str        },
-            {"gpu_pci_bus_id",     gpu_pci_bus_id        },
-            {"gpu_uuid",           gpu_uuid              },
-            {"comm_type",          "P2P"                 },
-            {"comm_nranks",        std::to_string(nranks)},
-            {"scale_up_exec_mode", scale_up_exec_mode    }
+        const auto context               = opentelemetry::context::Context{};
+        std::array<Attribute, 10> labels = {
+            makeStringAttribute("communicator", communicator),
+            makeStringAttribute("operation", operation),
+            makeStringAttribute("rank", rank_str),
+            makeStringAttribute("hostname", hostname),
+            makeStringAttribute("local_rank", local_rank_str),
+            makeStringAttribute("gpu_pci_bus_id", gpu_pci_bus_id),
+            makeStringAttribute("gpu_uuid", gpu_uuid),
+            makeStringAttribute("comm_type", "P2P"),
+            makeStringAttribute("comm_nranks", nranks_str),
+            makeStringAttribute("scale_up_exec_mode", scale_up_exec_mode),
         };
 
-        g_p2pBytesHist->Record(emit.avgBytes, labels, opentelemetry::context::Context{});
-        g_p2pTimeHist->Record(emit.avgTimeUs, labels, opentelemetry::context::Context{});
+        g_p2pBytesHist->Record(emit.avgBytes, labels, context);
+        g_p2pTimeHist->Record(emit.avgTimeUs, labels, context);
 
         if (eligibility.export_transfers)
         {
-            g_p2pNumTransfersHist->Record(emit.avgNumTransfers, labels, opentelemetry::context::Context{});
-            g_p2pTransferSizeHist->Record(emit.avgTransferSize, labels, opentelemetry::context::Context{});
+            g_p2pNumTransfersHist->Record(emit.avgNumTransfers, labels, context);
+            g_p2pTransferSizeHist->Record(emit.avgTransferSize, labels, context);
             if (eligibility.export_transfer_time)
             {
-                g_p2pTransferTimeHist->Record(emit.avgTransferTime, labels, opentelemetry::context::Context{});
+                g_p2pTransferTimeHist->Record(emit.avgTransferTime, labels, context);
             }
 
             OTEL_TRACE(NCCL_INIT,
@@ -198,73 +375,35 @@ void exportRankMetrics(const std::string& key, const RankEmitView& emit, const R
                        const std::string& scale_up_exec_mode, [[maybe_unused]] const char* export_tag)
 {
     (void)rank;
-    std::string communicator = "";
-    std::string source_rank  = "";
-    std::string dest_rank    = "";
-
-    size_t comm_pos     = key.find("Comm");
-    size_t first_sep    = key.find("_", comm_pos + 4);
-    size_t pipeline_pos = key.find("_Pipeline");
-    size_t peer_pos     = key.find("_ToPeer");
-
-    if (comm_pos != std::string::npos && first_sep != std::string::npos)
-    {
-        communicator = key.substr(comm_pos + 4, first_sep - comm_pos - 4);
-    }
-
-    if (pipeline_pos != std::string::npos && peer_pos == std::string::npos)
-    {
-        size_t src_start = pipeline_pos + 9;
-        size_t to_pos    = key.find("_ToPipeline", src_start);
-        if (to_pos != std::string::npos)
-        {
-            std::string src_pipeline = key.substr(src_start, to_pos - src_start);
-            std::string dst_pipeline = key.substr(to_pos + 11);
-            source_rank              = "Pipeline" + src_pipeline;
-            dest_rank                = "Pipeline" + dst_pipeline;
-        }
-    }
-    else if (peer_pos != std::string::npos)
-    {
-        size_t rank_pos = key.find("_Rank");
-        if (rank_pos != std::string::npos)
-        {
-            source_rank = key.substr(rank_pos + 5, peer_pos - rank_pos - 5);
-        }
-        dest_rank = key.substr(peer_pos + 7);
-    }
-
-    std::string metricCommType = comm_type;
-    if (pipeline_pos != std::string::npos && peer_pos == std::string::npos)
-        metricCommType = "P2P";
-    else if (peer_pos != std::string::npos)
-        metricCommType = "COLLECTIVE";
-
-    std::map<std::string, std::string> labels = {
-        {"communicator",       communicator              },
-        {"source_rank",        source_rank               },
-        {"dest_rank",          dest_rank                 },
-        {"hostname",           hostname                  },
-        {"gpu_pci_bus_id",     gpu_pci_bus_id            },
-        {"gpu_uuid",           gpu_uuid                  },
-        {"comm_type",          metricCommType            },
-        {"comm_nranks",        std::to_string(nranks)    },
-        {"local_rank",         std::to_string(local_rank)},
-        {"scale_up_exec_mode", scale_up_exec_mode        }
+    ParsedLinkKey parts              = parseLinkKey(key, comm_type, false);
+    std::string nranks_str           = std::to_string(nranks);
+    std::string localRankStr         = std::to_string(local_rank);
+    const auto context               = opentelemetry::context::Context{};
+    std::array<Attribute, 10> labels = {
+        makeStringAttribute("communicator", parts.communicator),
+        makeStringAttribute("source_rank", parts.sourceRank),
+        makeStringAttribute("dest_rank", parts.destRank),
+        makeStringAttribute("hostname", hostname),
+        makeStringAttribute("gpu_pci_bus_id", gpu_pci_bus_id),
+        makeStringAttribute("gpu_uuid", gpu_uuid),
+        makeStringAttribute("comm_type", parts.metricCommType),
+        makeStringAttribute("comm_nranks", nranks_str),
+        makeStringAttribute("local_rank", localRankStr),
+        makeStringAttribute("scale_up_exec_mode", scale_up_exec_mode),
     };
 
-    g_rankBytesCounter->Add(emit.totalBytes, labels, opentelemetry::context::Context{});
+    g_rankBytesCounter->Add(emit.totalBytes, labels, context);
 
     if (eligibility.export_latency)
     {
-        g_rankLatencyHist->Record(emit.latencyUs, labels, opentelemetry::context::Context{});
+        g_rankLatencyHist->Record(emit.latencyUs, labels, context);
         OTEL_TRACE(NCCL_INIT, "Exported Rank Latency (%s): %s, Latency: %.2f us", export_tag, key.c_str(),
                    emit.latencyUs);
     }
 
     if (eligibility.export_rate)
     {
-        g_rankRateHist->Record(emit.rateMBps, labels, opentelemetry::context::Context{});
+        g_rankRateHist->Record(emit.rateMBps, labels, context);
         OTEL_TRACE(NCCL_INIT, "Exported Rank Rate (%s): %s, Bytes: %llu, ActiveTime: %.2f us, Rate: %.2f MB/s",
                    export_tag, key.c_str(), static_cast<unsigned long long>(emit.totalBytes), emit.activeTimeUs,
                    emit.rateMBps);
@@ -299,84 +438,36 @@ void exportTransferMetrics(const std::string& key, const TransferEmitView& emit,
                            [[maybe_unused]] const char* export_tag)
 {
     (void)rank;
-    std::string communicator = "";
-    std::string source_rank  = "";
-    std::string dest_rank    = "";
-    std::string channel      = "";
-
-    size_t comm_pos     = key.find("Comm");
-    size_t first_sep    = key.find("_", comm_pos + 4);
-    size_t pipeline_pos = key.find("_Pipeline");
-    size_t peer_pos     = key.find("_ToPeer");
-    size_t chnl_pos     = key.find("_Chnl");
-
-    if (comm_pos != std::string::npos && first_sep != std::string::npos)
-    {
-        communicator = key.substr(comm_pos + 4, first_sep - comm_pos - 4);
-    }
-
-    if (pipeline_pos != std::string::npos && peer_pos == std::string::npos)
-    {
-        size_t src_start = pipeline_pos + 9;
-        size_t to_pos    = key.find("_ToPipeline", src_start);
-        if (to_pos != std::string::npos)
-        {
-            std::string src_pipeline = key.substr(src_start, to_pos - src_start);
-            std::string dst_pipeline = (chnl_pos != std::string::npos) ? key.substr(to_pos + 11, chnl_pos - to_pos - 11)
-                                                                       : key.substr(to_pos + 11);
-            source_rank              = "Pipeline" + src_pipeline;
-            dest_rank                = "Pipeline" + dst_pipeline;
-        }
-    }
-    else if (peer_pos != std::string::npos)
-    {
-        size_t rank_pos = key.find("_Rank");
-        if (rank_pos != std::string::npos)
-        {
-            source_rank = key.substr(rank_pos + 5, peer_pos - rank_pos - 5);
-        }
-        if (chnl_pos != std::string::npos)
-        {
-            dest_rank = key.substr(peer_pos + 7, chnl_pos - peer_pos - 7);
-        }
-    }
-
-    std::string metricCommType = comm_type;
-    if (pipeline_pos != std::string::npos && peer_pos == std::string::npos)
-        metricCommType = "P2P";
-    else if (peer_pos != std::string::npos)
-        metricCommType = "COLLECTIVE";
-
-    if (chnl_pos != std::string::npos)
-    {
-        channel = key.substr(chnl_pos + 5);
-    }
+    ParsedLinkKey parts      = parseLinkKey(key, comm_type, true);
+    std::string nranks_str   = std::to_string(nranks);
+    std::string localRankStr = std::to_string(local_rank);
 
     if (eligibility.export_channel_metrics)
     {
-        std::map<std::string, std::string> labels = {
-            {"communicator",       communicator              },
-            {"source_rank",        source_rank               },
-            {"dest_rank",          dest_rank                 },
-            {"channel",            channel                   },
-            {"hostname",           hostname                  },
-            {"gpu_pci_bus_id",     gpu_pci_bus_id            },
-            {"gpu_uuid",           gpu_uuid                  },
-            {"comm_type",          metricCommType            },
-            {"comm_nranks",        std::to_string(nranks)    },
-            {"local_rank",         std::to_string(local_rank)},
-            {"scale_up_exec_mode", scale_up_exec_mode        }
+        const auto context               = opentelemetry::context::Context{};
+        std::array<Attribute, 11> labels = {
+            makeStringAttribute("communicator", parts.communicator),
+            makeStringAttribute("source_rank", parts.sourceRank),
+            makeStringAttribute("dest_rank", parts.destRank),
+            makeStringAttribute("channel", parts.channel),
+            makeStringAttribute("hostname", hostname),
+            makeStringAttribute("gpu_pci_bus_id", gpu_pci_bus_id),
+            makeStringAttribute("gpu_uuid", gpu_uuid),
+            makeStringAttribute("comm_type", parts.metricCommType),
+            makeStringAttribute("comm_nranks", nranks_str),
+            makeStringAttribute("local_rank", localRankStr),
+            makeStringAttribute("scale_up_exec_mode", scale_up_exec_mode),
         };
 
-        g_transferSizeHist->Record(emit.avgSize, labels, opentelemetry::context::Context{});
+        g_transferSizeHist->Record(emit.avgSize, labels, context);
         if (eligibility.export_avg_time)
         {
-            g_transferTimeHist->Record(emit.avgTime, labels, opentelemetry::context::Context{});
+            g_transferTimeHist->Record(emit.avgTime, labels, context);
         }
 
         if (eligibility.export_latency)
         {
-            g_transferLatencyHist->Record(emit.latencyUs, labels, opentelemetry::context::Context{});
+            g_transferLatencyHist->Record(emit.latencyUs, labels, context);
             OTEL_TRACE(NCCL_INIT, "Exported Transfer (%s): %s, AvgSize: %.2f, AvgTime: %.2f us, Latency: %.2f us",
                        export_tag, key.c_str(), emit.avgSize, emit.avgTime, emit.latencyUs);
         }

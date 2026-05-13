@@ -18,20 +18,20 @@
 /**
  * @brief Resolve the configured linear-regression mode for transfer fitting.
  *
- * @return Configured regression mode, defaulting to MIN for unset or invalid input.
+ * @return Configured regression mode, defaulting to AVG for unset or invalid input.
  */
 static LinearRegression::Mode getLinearRegressionMode()
 {
     const char* modeStr = ncclParamLinearRegressionMode();
-    if (strcmp(modeStr, "AVG") == 0)
+    if (strcmp(modeStr, "MIN") == 0)
     {
-        return LinearRegression::Mode::AVG;
+        return LinearRegression::Mode::MIN;
     }
-    if (strcmp(modeStr, "MIN") != 0 && strcmp(modeStr, "") != 0)
+    if (strcmp(modeStr, "AVG") != 0 && strcmp(modeStr, "") != 0)
     {
-        OTEL_WARN(NCCL_INIT, "Unknown LinearRegressionMode '%s', defaulting to MIN", modeStr);
+        OTEL_WARN(NCCL_INIT, "Unknown LinearRegressionMode '%s', defaulting to AVG", modeStr);
     }
-    return LinearRegression::Mode::MIN;
+    return LinearRegression::Mode::AVG;
 }
 
 /**

@@ -6,6 +6,8 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "profiler_otel.h"
 
@@ -44,7 +46,8 @@ using PrimerBucket = std::map<std::string, PrimerData<T>>;
 template <typename T>
 using PrimerStore = std::map<PrimerScopeKey, PrimerBucket<T>>;
 
-using PrimerDoneStore = std::map<PrimerScopeKey, std::set<std::string>>;
+using PrimerDoneBucket = std::unordered_set<std::string>;
+using PrimerDoneStore  = std::unordered_map<PrimerScopeKey, PrimerDoneBucket, PrimerScopeKeyHash>;
 
 // Primer storage for each metric type
 static PrimerStore<AggregatedCollective> g_collectivePrimers;
@@ -273,8 +276,8 @@ static std::set<std::string> processPendingPrimers(CommunicatorState* commState,
         return handledKeys;
     }
 
-    PrimerBucket<T>& scopePrimers    = primerScopeIt->second;
-    std::set<std::string>& scopeDone = donePrimers[scope];
+    PrimerBucket<T>& scopePrimers = primerScopeIt->second;
+    PrimerDoneBucket& scopeDone   = donePrimers[scope];
 
     for (auto it = scopePrimers.begin(); it != scopePrimers.end();)
     {

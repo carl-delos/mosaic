@@ -15,6 +15,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/ProfilerSources.cmake)
 
 profiler_set_platform_defaults()
 profiler_detect_gpu_runtime("Tests: ")
+profiler_configure_sampling_profile("Tests: ")
 
 # Code coverage support. Enable with -DCODE_COVERAGE=ON.
 option(CODE_COVERAGE "Build tests with gcov coverage instrumentation" OFF)

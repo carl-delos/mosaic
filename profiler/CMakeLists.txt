@@ -26,6 +26,7 @@ profiler_set_platform_defaults()
 profiler_detect_gpu_runtime("")
 profiler_configure_trace("" "PROFILER OTEL TRACE enabled (TRACE=1)"
                          "PROFILER OTEL TRACE disabled (build without TRACE=1)")
+profiler_configure_sampling_profile("")
 profiler_resolve_nccl_paths("" TRUE)
 
 # OpenTelemetry C++ SDK path (optional, for custom installations)

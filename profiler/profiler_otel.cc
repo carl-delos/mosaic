@@ -219,9 +219,9 @@ size_t test_ncclTypeSize(const char* datatype)
 #endif  // UNIT_TESTING
 // PARAM: LinearRegressionMode
 // ENV: NCCL_PROFILER_LINEAR_REGRESSION_MODE
-// DEFAULT: MIN
+// DEFAULT: AVG
 // DESCRIPTION: Linear regression mode for latency/rate estimation. Supported: MIN, AVG.
-OTEL_STRING_PARAM(LinearRegressionMode, "PROFILER_LINEAR_REGRESSION_MODE", "MIN");
+OTEL_STRING_PARAM(LinearRegressionMode, "PROFILER_LINEAR_REGRESSION_MODE", "AVG");
 // PARAM: ScaleUpNetworkPct
 // ENV: NCCL_PROFILER_OTEL_SCALEUP_NETWORK_PCT
 // DEFAULT: 100

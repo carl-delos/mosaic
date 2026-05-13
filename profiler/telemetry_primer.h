@@ -67,9 +67,25 @@ struct PrimerScopeKey
     uint64_t commHash;
     int rank;
 
+    bool operator==(const PrimerScopeKey& other) const
+    {
+        return commHash == other.commHash && rank == other.rank;
+    }
+
     bool operator<(const PrimerScopeKey& other) const
     {
         return std::tie(commHash, rank) < std::tie(other.commHash, other.rank);
+    }
+};
+
+/**
+ * @brief Hash functor for PrimerScopeKey.
+ */
+struct PrimerScopeKeyHash
+{
+    size_t operator()(const PrimerScopeKey& key) const noexcept
+    {
+        return std::hash<uint64_t>{}(key.commHash) ^ (std::hash<int>{}(key.rank) << 1);
     }
 };
 
